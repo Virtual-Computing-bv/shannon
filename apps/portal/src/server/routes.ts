@@ -169,8 +169,12 @@ router.put('/targets/:id', requireAuth, (req, res) => {
     return;
   }
   const fields = parsed.data;
+  // node:sqlite is stricter about parameter types than better-sqlite3 —
+  // bound values must be string|number|null|bigint|Uint8Array. Coerce up
+  // front so the typed array satisfies SQLInputValue without TS narrowing
+  // gymnastics at every push site.
   const sets: string[] = [];
-  const vals: unknown[] = [];
+  const vals: Array<string | number | null> = [];
   if (fields.name !== undefined) { sets.push('name=?'); vals.push(fields.name); }
   if (fields.url !== undefined) { sets.push('url=?'); vals.push(fields.url); }
   if (fields.repoUrl !== undefined) { sets.push('repo_url=?'); vals.push(fields.repoUrl); }
