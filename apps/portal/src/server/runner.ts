@@ -88,6 +88,8 @@ export async function runScan(scanId: string, targetId: string): Promise<void> {
     const args = ['start', '-u', target.url, '-r', repoDir, '-w', scanId, '-o', reportDir];
     if (configPath) args.push('-c', configPath);
 
+    // Spawn the CLI in pipe mode so we can both write to the log file AND
+    // sniff stdout for heuristic phase detection.
     const child = execa('./shannon', args, {
       cwd: SHANNON_DIR,
       env: {
@@ -95,27 +97,36 @@ export async function runScan(scanId: string, targetId: string): Promise<void> {
         SHANNON_LOCAL: '1',
         ANTHROPIC_API_KEY: anthropicKey,
       },
-      stdout: logStream,
-      stderr: logStream,
-      reject: false,
     });
 
-    // Heuristic phase detection from worker log lines.
     child.stdout?.on('data', (buf: Buffer) => {
       const txt = buf.toString();
-      if (txt.includes('recon') && !txt.includes('pre-recon')) setStatus(scanId, 'recon');
+      logStream.write(txt);
+      if (txt.includes('-exploit')) setStatus(scanId, 'exploiting');
       else if (txt.includes('-vuln')) setStatus(scanId, 'analyzing');
-      else if (txt.includes('-exploit')) setStatus(scanId, 'exploiting');
-      else if (txt.includes('report')) setStatus(scanId, 'reporting');
+      else if (txt.includes('reporting')) setStatus(scanId, 'reporting');
+      else if (txt.includes('recon') && !txt.includes('pre-recon')) setStatus(scanId, 'recon');
+    });
+    child.stderr?.on('data', (buf: Buffer) => {
+      logStream.write(buf);
     });
 
-    const result = await child;
-    if (result.exitCode === 0) {
+    let exitCode = 0;
+    let errMsg: string | undefined;
+    try {
+      await child;
+    } catch (e) {
+      const result = e as { exitCode?: number; shortMessage?: string };
+      exitCode = result.exitCode ?? -1;
+      errMsg = result.shortMessage ?? (e instanceof Error ? e.message : String(e));
+    }
+
+    if (exitCode === 0) {
       setStatus(scanId, 'completed', { exitCode: 0 });
       log(`Scan completed.`);
     } else {
-      setStatus(scanId, 'failed', { exitCode: result.exitCode ?? -1, error: result.shortMessage });
-      log(`Scan failed (exit ${result.exitCode}): ${result.shortMessage}`);
+      setStatus(scanId, 'failed', { exitCode, error: errMsg ?? 'unknown error' });
+      log(`Scan failed (exit ${exitCode}): ${errMsg ?? 'unknown'}`);
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
