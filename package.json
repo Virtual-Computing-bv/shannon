@@ -22,7 +22,10 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "@swc/core",
-      "protobufjs"
+      "protobufjs",
+      "better-sqlite3",
+      "sqlite3",
+      "bcrypt"
     ]
   }
 }
