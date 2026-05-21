@@ -1,16 +1,10 @@
 import express from 'express';
 import session from 'express-session';
-import SQLiteStoreFactory from 'connect-sqlite3';
-import path from 'node:path';
-import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { router } from './routes.js';
 import { getSetting, setSetting } from './db.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
-const DATA_DIR = process.env.NAHAYAT_DATA_DIR ?? '/data';
-const SESSION_DIR = path.join(DATA_DIR, 'sessions');
-fs.mkdirSync(SESSION_DIR, { recursive: true });
 
 // Persist the session secret across container restarts so the customer doesn't
 // get logged out on every redeploy. Generated once on first run.
@@ -22,13 +16,17 @@ function loadSessionSecret(): string {
   return fresh;
 }
 
-const SQLiteStore = SQLiteStoreFactory(session);
+// v0: in-memory session store. The user-database (better-sqlite3) survives
+// container restarts, but in-flight sessions don't — customer re-logs in
+// after a redeploy. Trade-off keeps the image free of glibc-only native
+// deps (connect-sqlite3 pulls in sqlite3 which has no musl prebuilt). When
+// we move to a long-running portal we can swap in a better-sqlite3-backed
+// store.
 const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
 app.use(
   session({
-    store: new (SQLiteStore as any)({ db: 'sessions.sqlite', dir: SESSION_DIR }) as session.Store,
     secret: loadSessionSecret(),
     resave: false,
     saveUninitialized: false,
