@@ -77,9 +77,10 @@ Sidecar `docker:dind` runs privileged on a per-deploy basis; the portal
 talks to it via `DOCKER_HOST=tcp://shannon-dind:2375`. This isolates each
 customer's nested Docker daemon from the swarm host.
 
-**Status**: the control-plane sidecar schema does not yet support the
-`--privileged` flag required by DinD. See `nahayat-docker-platform/control-plane`
-issue (to add) before registering this template with a DinD sidecar.
+This is the default for the `nahayat-pentest` template in our catalog.
+The `privileged: true` flag on the sidecar maps to swarm `CapabilityAdd:
+ALL` + `Privileges.Seccomp: unconfined` + `Privileges.AppArmor: disabled`
+— enough for DinD without needing the unsupported `--privileged` shortcut.
 
 ## Environment variables
 
