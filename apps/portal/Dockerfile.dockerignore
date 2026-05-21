@@ -1,0 +1,27 @@
+# BuildKit picks this up because it's colocated with `apps/portal/Dockerfile`.
+# Overrides the root .dockerignore (which excludes apps/cli/src/ + infra/
+# because upstream's worker image doesn't need the CLI). Our portal image
+# bundles the CLI inside the container, so we must NOT exclude it here.
+
+# Excludes — keep small + reproducible.
+**/node_modules/
+**/dist/
+.git/
+.github/
+.claude/
+**/.DS_Store
+**/Thumbs.db
+**/*.log
+**/.idea/
+**/.vscode/
+
+# Build artefacts + workspace dirs that aren't needed in CI.
+sessions/
+deliverables/
+xben-benchmark-results/
+workspaces/
+repos/
+
+# Other Dockerfiles aren't part of our build context.
+Dockerfile
+docker-compose.yml
