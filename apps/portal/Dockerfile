@@ -4,9 +4,15 @@
 # Temporal + worker inside that DinD so nothing leaks onto the swarm host.
 
 # ── Stage 1: build the monorepo (CLI bundle + portal web/server) ─────────────
-FROM node:22-alpine AS builder
+# Debian-slim base (glibc) — alpine/musl prebuilds for better-sqlite3 +
+# friends are flakier and have hit "Could not locate the bindings file"
+# multiple times in CI. The size delta is ~50MB, easily worth predictable
+# native deps.
+FROM node:22-slim AS builder
 
-RUN apk add --no-cache bash python3 make g++ git
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash python3 make g++ git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 RUN npm install -g --ignore-scripts pnpm@10.33.0
 
 WORKDIR /build
@@ -35,14 +41,20 @@ RUN rm -rf node_modules apps/*/node_modules \
   && pnpm install --frozen-lockfile --prod
 
 # ── Stage 2: runtime image ───────────────────────────────────────────────────
-FROM node:22-alpine AS runtime
+FROM node:22-slim AS runtime
 
-# Tools we need at runtime:
-#   docker-cli + docker-cli-compose  — talk to DinD sidecar
-#   git                              — shallow-clone customer repos
-#   bash                             — Shannon's entrypoint scripts
-#   ca-certificates                  — TLS to Anthropic + GitHub
-RUN apk add --no-cache bash git docker-cli docker-cli-compose ca-certificates curl
+# Runtime tools:
+#   git                — shallow-clone customer repos
+#   bash + ca-certificates + curl — entrypoint + outbound HTTPS
+#   docker static CLI  — talk to remote DinD/socket (no daemon needed here)
+ARG DOCKER_CLI_VERSION=27.3.1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash git ca-certificates curl \
+    && curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
+        | tar -xz -C /tmp \
+    && mv /tmp/docker/docker /usr/local/bin/docker \
+    && chmod +x /usr/local/bin/docker \
+    && rm -rf /tmp/docker /var/lib/apt/lists/*
 
 WORKDIR /app
 
