@@ -36,9 +36,14 @@ RUN pnpm --filter @keygraph/shannon run build
 # Build the portal (Vite for the React UI, tsc for the Express server).
 RUN pnpm --filter @nahayat/pentest-portal run build
 
-# Re-install prod-only deps for runtime stage.
-RUN rm -rf node_modules apps/*/node_modules \
-  && pnpm install --frozen-lockfile --prod
+# Explicitly rebuild native modules so the .node binaries land in
+# node_modules/.pnpm/<pkg>/.../build/ for the runtime stage to copy.
+RUN pnpm rebuild
+
+# NOTE: we don't strip devDeps for a prod-only install — pnpm's --prod
+# pass has skipped install scripts in CI, leaving better-sqlite3 without
+# its native binding. Carrying ~30MB extra of dev tooling is the cheaper
+# trade than another debugging round-trip.
 
 # ── Stage 2: runtime image ───────────────────────────────────────────────────
 FROM node:22-slim AS runtime
