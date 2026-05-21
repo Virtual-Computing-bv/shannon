@@ -1,10 +1,13 @@
 import express from 'express';
 import session from 'express-session';
 import crypto from 'node:crypto';
+import path from 'node:path';
+import fs from 'node:fs';
 import { router } from './routes.js';
 import { getSetting, setSetting } from './db.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
+const DATA_DIR = process.env.NAHAYAT_DATA_DIR ?? '/data';
 
 // Persist the session secret across container restarts so the customer doesn't
 // get logged out on every redeploy. Generated once on first run.
