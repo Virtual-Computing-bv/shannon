@@ -1,4 +1,4 @@
-import Database, { type Database as DatabaseType } from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
@@ -6,15 +6,15 @@ import crypto from 'node:crypto';
 const DATA_DIR = process.env.NAHAYAT_DATA_DIR ?? '/data';
 const DB_PATH = process.env.NAHAYAT_DB_PATH ?? path.join(DATA_DIR, 'portal.db');
 
-function ensureDir(): void {
-  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-}
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
-ensureDir();
-
-export const db: DatabaseType = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+// Node 22.5+ ships node:sqlite as an experimental built-in — no native
+// binding to compile, no musl/glibc differences, no pnpm install-script
+// dances. The API mirrors better-sqlite3 closely enough that the rest of
+// the code is unchanged.
+export const db: DatabaseSync = new DatabaseSync(DB_PATH);
+db.exec('PRAGMA journal_mode = WAL');
+db.exec('PRAGMA foreign_keys = ON');
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS settings (
@@ -54,19 +54,18 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS scans_status_idx ON scans (status);
 `);
 
-// AES-256-GCM with a key derived from `NAHAYAT_ENCRYPTION_KEY` (or a stable
-// per-DB key auto-generated on first launch). Used for the Anthropic API key
-// in `settings`. The portal-wide value lives in `settings(key='encryption_kid')`
-// so we never accidentally re-derive a different key after upgrades.
+// AES-256-GCM with a key derived from $NAHAYAT_ENCRYPTION_KEY (or a stable
+// per-DB key auto-generated on first launch). Used for the Anthropic API
+// key in `settings`.
 const ENC_KEY = deriveEncKey();
 
 function deriveEncKey(): Buffer {
   const explicit = process.env.NAHAYAT_ENCRYPTION_KEY;
   if (explicit) return crypto.createHash('sha256').update(explicit).digest();
-  const existing = (db
+  const row = db
     .prepare(`SELECT value FROM settings WHERE key='encryption_kid'`)
-    .get() as { value: string } | undefined)?.value;
-  if (existing) return crypto.createHash('sha256').update(existing).digest();
+    .get() as { value: string } | undefined;
+  if (row?.value) return crypto.createHash('sha256').update(row.value).digest();
   const fresh = crypto.randomBytes(48).toString('base64');
   db.prepare(`INSERT INTO settings (key, value) VALUES ('encryption_kid', ?)`).run(fresh);
   return crypto.createHash('sha256').update(fresh).digest();

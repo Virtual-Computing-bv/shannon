@@ -100,4 +100,6 @@ COPY apps/portal/docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-CMD ["node", "apps/portal/dist/server/index.js"]
+# --experimental-sqlite: node:sqlite is built-in since 22.5 but still gated
+# behind the flag on Node 22.x. Lets us skip native better-sqlite3.
+CMD ["node", "--experimental-sqlite", "apps/portal/dist/server/index.js"]
