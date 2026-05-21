@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import Database, { type Database as DatabaseType } from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
@@ -12,7 +12,7 @@ function ensureDir(): void {
 
 ensureDir();
 
-export const db = new Database(DB_PATH);
+export const db: DatabaseType = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 

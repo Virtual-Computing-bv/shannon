@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import express, { type Router as ExpressRouter } from 'express';
 import bcrypt from 'bcrypt';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -16,7 +16,7 @@ declare module 'express-session' {
   }
 }
 
-export const router = Router();
+export const router: ExpressRouter = express.Router();
 
 function requireAuth(req: any, res: any, next: any): void {
   if (!req.session?.userId) {
