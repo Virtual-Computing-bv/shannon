@@ -94,8 +94,13 @@ ENV NAHAYAT_DATA_DIR=/data \
 # wiring will override this if the customer renames the service.
 ENV DOCKER_HOST=tcp://shannon-dind:2375
 
-# Prepare HOME so Shannon's ~/.shannon state survives container restarts.
-RUN mkdir -p /data/.home && chmod 0777 /data
+# Non-root user. Shannon's CLI hard-blocks UID 0 (see apps/cli/src/index.ts
+# blockSudo()). We talk to the DinD sidecar over TCP, not the host socket,
+# so no group-membership games are needed — DOCKER_HOST is enough.
+RUN groupadd --system --gid 1001 scanner \
+    && useradd  --system --uid 1001 --gid scanner --home /data/.home --shell /bin/bash scanner \
+    && mkdir -p /data/.home /data/repos /data/reports /data/logs /data/workspaces \
+    && chown -R scanner:scanner /data /app
 
 EXPOSE 3001
 
@@ -103,6 +108,8 @@ EXPOSE 3001
 # start the daemon, and Shannon's CLI fails fast if it can't talk to docker.
 COPY apps/portal/docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
+
+USER scanner
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 # --experimental-sqlite: node:sqlite is built-in since 22.5 but still gated
