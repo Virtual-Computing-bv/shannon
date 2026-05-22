@@ -18,12 +18,36 @@
  *   /reports/<scan-id>/           — final report copied via --output flag
  *   /logs/<scan-id>.log           — combined stdout+stderr
  */
-import { execa } from 'execa';
+import { execa, type ResultPromise } from 'execa';
 import fs from 'node:fs';
 import path from 'node:path';
 import { db, decrypt } from './db.js';
 import { decryptedAnthropicKey } from './settings.js';
 import type { ScanStatus } from '../shared/types.js';
+
+/**
+ * Tracks live worker child processes per scan-id so the portal can implement
+ * an interactive "Stop scan" button. Entries are inserted just before the
+ * worker spawns and removed on either natural completion or stopScan().
+ *
+ * The runner explicitly marks a scan as user-cancelled via `cancellingScans`
+ * before issuing the SIGTERM, so the post-spawn exit handler in runScan()
+ * writes status='cancelled' instead of status='failed'.
+ */
+const runningScans: Map<string, ResultPromise> = new Map();
+const cancellingScans: Set<string> = new Set();
+
+const SIGTERM_GRACE_MS = 5_000;
+
+const ACTIVE_STATUSES: ReadonlySet<ScanStatus> = new Set<ScanStatus>([
+  'pending',
+  'cloning',
+  'pre-recon',
+  'recon',
+  'analyzing',
+  'exploiting',
+  'reporting',
+]);
 
 const DATA_DIR = process.env.NAHAYAT_DATA_DIR ?? '/data';
 const REPOS_DIR = path.join(DATA_DIR, 'repos');
@@ -203,6 +227,11 @@ export async function runScan(scanId: string, targetId: string): Promise<void> {
       },
     });
 
+    // Register the child so the stop-scan endpoint can SIGTERM it. We do this
+    // *after* execa() returns (so .pid is bound) but before awaiting the
+    // promise — otherwise stopScan would have nothing to kill.
+    runningScans.set(scanId, child);
+
     child.stdout?.on('data', (buf: Buffer) => {
       const txt = buf.toString();
       logStream.write(txt);
@@ -217,15 +246,23 @@ export async function runScan(scanId: string, targetId: string): Promise<void> {
 
     let exitCode = 0;
     let errMsg: string | undefined;
+    let killedBySignal: string | undefined;
     try {
       await child;
     } catch (e) {
-      const result = e as { exitCode?: number; shortMessage?: string };
+      const result = e as { exitCode?: number; shortMessage?: string; signal?: string; isCanceled?: boolean };
       exitCode = result.exitCode ?? -1;
       errMsg = result.shortMessage ?? (e instanceof Error ? e.message : String(e));
+      killedBySignal = result.signal;
+    } finally {
+      runningScans.delete(scanId);
     }
 
-    if (exitCode === 0) {
+    const wasCancelled = cancellingScans.delete(scanId);
+    if (wasCancelled || killedBySignal === 'SIGTERM' || killedBySignal === 'SIGKILL') {
+      setStatus(scanId, 'cancelled', { exitCode, error: 'cancelled by user' });
+      log(`Scan cancelled by user (signal=${killedBySignal ?? 'n/a'}, exit=${exitCode}).`);
+    } else if (exitCode === 0) {
       setStatus(scanId, 'completed', { exitCode: 0 });
       log(`Scan completed.`);
     } else {
@@ -237,8 +274,93 @@ export async function runScan(scanId: string, targetId: string): Promise<void> {
     setStatus(scanId, 'failed', { error: msg });
     log(`Scan crashed: ${msg}`);
   } finally {
+    runningScans.delete(scanId);
+    cancellingScans.delete(scanId);
     logStream.end();
   }
+}
+
+/**
+ * Best-effort graceful stop of a running scan. Returns the resulting scan
+ * status so the route handler can echo it back to the UI. Idempotent —
+ * repeated calls on the same scan-id (or on an already-finished scan) just
+ * return the current DB state.
+ */
+export async function stopScan(scanId: string): Promise<{
+  stopped: boolean;
+  status: ScanStatus;
+  finishedAt: string | null;
+  exitCode: number | null;
+  error: string | null;
+}> {
+  const current = currentScanState(scanId);
+  if (!current) {
+    return { stopped: false, status: 'failed', finishedAt: null, exitCode: null, error: 'scan not found' };
+  }
+  if (!ACTIVE_STATUSES.has(current.status)) {
+    // Already terminal — nothing to kill, just echo state.
+    return { stopped: false, ...current };
+  }
+
+  const child = runningScans.get(scanId);
+  if (!child || child.exitCode !== null) {
+    // The DB still says "running" but our in-memory handle is gone (process
+    // crashed without the exit-handler running, or this portal instance was
+    // restarted mid-scan). Mark the row cancelled so the UI doesn't get
+    // stuck on a phantom "running" forever.
+    runningScans.delete(scanId);
+    setStatus(scanId, 'cancelled', { error: 'cancelled by user (worker process gone)' });
+    return { stopped: true, ...currentScanState(scanId)! };
+  }
+
+  cancellingScans.add(scanId);
+  try {
+    child.kill('SIGTERM');
+  } catch {
+    // process already gone — fall through to await/SIGKILL path
+  }
+
+  // Give the worker SIGTERM_GRACE_MS to flush deliverables + close Temporal
+  // connections, then escalate. The runScan() exit handler is the one that
+  // actually writes status='cancelled', so we just need to make sure the
+  // child eventually dies.
+  const killTimer = setTimeout(() => {
+    if (runningScans.has(scanId) && child.exitCode === null) {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already dead */
+      }
+    }
+  }, SIGTERM_GRACE_MS);
+
+  try {
+    await child.catch(() => undefined);
+  } finally {
+    clearTimeout(killTimer);
+  }
+
+  return { stopped: true, ...currentScanState(scanId)! };
+}
+
+function currentScanState(scanId: string): {
+  status: ScanStatus;
+  finishedAt: string | null;
+  exitCode: number | null;
+  error: string | null;
+} | null {
+  const row = db
+    .prepare(`SELECT status, finished_at, exit_code, error FROM scans WHERE id=?`)
+    .get(scanId) as
+    | { status: ScanStatus; finished_at: string | null; exit_code: number | null; error: string | null }
+    | undefined;
+  if (!row) return null;
+  return {
+    status: row.status,
+    finishedAt: row.finished_at,
+    exitCode: row.exit_code,
+    error: row.error,
+  };
 }
 
 export function reportPath(scanId: string): string | null {

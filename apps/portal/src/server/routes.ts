@@ -6,7 +6,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { db, encrypt } from './db.js';
 import { markAdminInitialized, publicSettings, setAnthropicKey } from './settings.js';
-import { logTail, reportPath, runScan } from './runner.js';
+import { logTail, reportPath, runScan, stopScan } from './runner.js';
 import type { Scan, ScanWithTarget, Target } from '../shared/types.js';
 
 declare module 'express-session' {
@@ -279,6 +279,30 @@ router.get('/scans', requireAuth, (_req, res) => {
 
 router.get('/scans/:id/logs', requireAuth, (req, res) => {
   res.type('text/plain').send(logTail(req.params.id));
+});
+
+// Stop a running scan. Sends SIGTERM to the in-process worker child, then
+// SIGKILL after a 5s grace window. Idempotent — a stop call on an already
+// terminal scan is a noop that just echoes the current state.
+router.post('/scans/:id/stop', requireAuth, async (req, res) => {
+  try {
+    const result = await stopScan(req.params.id);
+    if (result.status === 'failed' && result.error === 'scan not found') {
+      res.status(404).json({ error: 'scan not found' });
+      return;
+    }
+    res.json({
+      id: req.params.id,
+      stopped: result.stopped,
+      status: result.status,
+      finishedAt: result.finishedAt,
+      exitCode: result.exitCode,
+      error: result.error,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
 });
 
 router.get('/scans/:id/report', requireAuth, (req, res) => {

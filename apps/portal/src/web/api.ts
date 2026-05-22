@@ -51,6 +51,15 @@ export const Api = {
   listScans: () => api<{ data: ScanWithTarget[] }>('/scans').then((r) => r.data),
   startScan: (targetId: string) =>
     api<{ id: string }>('/scans', { method: 'POST', body: JSON.stringify({ targetId }) }),
+  stopScan: (id: string) =>
+    api<{
+      id: string;
+      stopped: boolean;
+      status: Scan['status'];
+      finishedAt: string | null;
+      exitCode: number | null;
+      error: string | null;
+    }>(`/scans/${id}/stop`, { method: 'POST' }),
   scanLogs: (id: string) => api<string>(`/scans/${id}/logs`),
   scanReport: (id: string) => api<string>(`/scans/${id}/report`),
   scanReportDownloadUrl: (id: string) => `/api/scans/${id}/report/download`,

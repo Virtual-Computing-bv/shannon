@@ -14,10 +14,21 @@ const STATUS_LABEL: Record<ScanWithTarget['status'], { label: string; class: str
   cancelled: { label: 'Geannuleerd', class: 'border-muted-foreground/30 text-muted-foreground' },
 };
 
+const ACTIVE_SCAN_STATUSES: ReadonlySet<ScanWithTarget['status']> = new Set([
+  'pending',
+  'cloning',
+  'pre-recon',
+  'recon',
+  'analyzing',
+  'exploiting',
+  'reporting',
+]);
+
 export function Scans() {
   const [scans, setScans] = useState<ScanWithTarget[]>([]);
   const [loading, setLoading] = useState(true);
   const [viewing, setViewing] = useState<ScanWithTarget | null>(null);
+  const [stoppingId, setStoppingId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -26,6 +37,29 @@ export function Scans() {
       setLoading(false);
     }
   }, []);
+
+  const handleStop = useCallback(
+    async (scan: ScanWithTarget) => {
+      if (
+        !window.confirm(
+          'Weet je het zeker? De lopende scan-stappen worden afgebroken. Reeds opgeslagen tussenresultaten blijven bewaard.',
+        )
+      ) {
+        return;
+      }
+      setStoppingId(scan.id);
+      try {
+        await Api.stopScan(scan.id);
+        await refresh();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        window.alert(`Stoppen mislukt: ${msg}`);
+      } finally {
+        setStoppingId(null);
+      }
+    },
+    [refresh],
+  );
 
   useEffect(() => {
     refresh();
@@ -73,6 +107,15 @@ export function Scans() {
                     <button onClick={() => setViewing(s)} className="btn-ghost">
                       Bekijken
                     </button>
+                    {ACTIVE_SCAN_STATUSES.has(s.status) && (
+                      <button
+                        onClick={() => handleStop(s)}
+                        disabled={stoppingId === s.id}
+                        className="btn-ghost text-destructive disabled:opacity-50"
+                      >
+                        {stoppingId === s.id ? 'Bezig met stoppen…' : 'Stop scan'}
+                      </button>
+                    )}
                     {s.status === 'completed' && (
                       <a
                         href={Api.scanReportDownloadUrl(s.id)}
