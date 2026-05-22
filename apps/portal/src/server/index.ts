@@ -27,6 +27,13 @@ function loadSessionSecret(): string {
 // store.
 const app = express();
 app.disable('x-powered-by');
+// Container always runs behind a TLS-terminating reverse proxy (Traefik on
+// the control-plane swarm). Without trust proxy, Express sees the inbound
+// connection as plain HTTP, so `cookie.secure = true` silently drops the
+// session cookie on every login — the browser never receives Set-Cookie,
+// /bootstrap stays authenticated:false, and the login button appears to do
+// nothing. Trusting the first proxy hop reads X-Forwarded-Proto correctly.
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
 app.use(
   session({
