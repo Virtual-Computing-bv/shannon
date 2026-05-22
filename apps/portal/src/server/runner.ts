@@ -82,6 +82,15 @@ export async function runScan(scanId: string, targetId: string): Promise<void> {
 
   const logPath = path.join(LOGS_DIR, `${scanId}.log`);
   const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+  // node:child_process requires every stdio member to expose a numeric fd at
+  // spawn time. createWriteStream opens lazily, so the fd is still null on the
+  // microtask we'd otherwise spawn on, and Node throws ERR_INVALID_ARG_VALUE
+  // before any output is written. Wait for the 'open' event so the OS fd is
+  // attached before the stream is handed to execa.
+  await new Promise<void>((resolve, reject) => {
+    logStream.once('open', () => resolve());
+    logStream.once('error', reject);
+  });
   const log = (msg: string): void => {
     logStream.write(`[${new Date().toISOString()}] ${msg}\n`);
   };
