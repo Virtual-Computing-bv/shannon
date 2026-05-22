@@ -13,6 +13,12 @@ export interface Target {
    */
   repoSource: 'github-url' | 'local-path';
   repoUrl: string;
+  /**
+   * True when an encrypted Git access token is stored for this target. The
+   * token itself is never returned over the API — clients only know that it
+   * is set (so the form can show a "leave blank to keep" placeholder).
+   */
+  repoTokenSet: boolean;
   /** Optional YAML config (auth + rules). Stored verbatim. */
   configYaml: string | null;
   createdAt: string;

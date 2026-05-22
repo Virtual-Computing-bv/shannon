@@ -74,6 +74,11 @@ export function Targets() {
                   <div className="flex items-center gap-2 flex-wrap">
                     <h3 className="text-lg font-semibold">{t.name}</h3>
                     <span className="badge">{t.repoSource}</span>
+                    {t.repoTokenSet && (
+                      <span className="badge" title="Encrypted Git access token opgeslagen">
+                        token
+                      </span>
+                    )}
                   </div>
                   <a
                     href={t.url}
@@ -136,26 +141,34 @@ function TargetForm({
   const [name, setName] = useState(initial?.name ?? '');
   const [url, setUrl] = useState(initial?.url ?? '');
   const [repoUrl, setRepoUrl] = useState(initial?.repoUrl ?? '');
+  const [repoToken, setRepoToken] = useState('');
   const [configYaml, setConfigYaml] = useState(initial?.configYaml ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const hasExistingToken = !!initial?.repoTokenSet;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const body = {
+      // On create: send the token if filled.
+      // On edit:   empty input → keep existing (server sees ''), otherwise replace.
+      const body: Parameters<typeof Api.createTarget>[0] & { repoTokenSet?: boolean } = {
         name,
         url,
         repoSource: 'github-url' as const,
         repoUrl,
+        repoTokenSet: hasExistingToken,
         configYaml: configYaml.trim() || null,
       };
+      const payload: Record<string, unknown> = { ...body };
+      if (repoToken.trim() !== '') payload.repoToken = repoToken.trim();
       if (initial) {
-        await Api.updateTarget(initial.id, body);
+        await Api.updateTarget(initial.id, payload as Partial<Target>);
       } else {
-        await Api.createTarget(body);
+        await Api.createTarget(payload as Parameters<typeof Api.createTarget>[0]);
       }
       onSaved();
     } catch (e) {
@@ -205,8 +218,30 @@ function TargetForm({
               required
             />
             <p className="mt-1 text-[10px] text-muted-foreground">
-              Voor private repos: gebruik een HTTPS-URL met token, bv.{' '}
-              <code>https://ghp_xxx@github.com/org/repo.git</code>
+              Gewone HTTPS-URL — geen token erin. Vul hieronder een PAT in voor private repos.
+            </p>
+          </div>
+          <div>
+            <label className="label">
+              GitHub access token (PAT) <span className="text-muted-foreground">— optioneel</span>
+            </label>
+            <input
+              type="password"
+              className="input font-mono text-xs"
+              value={repoToken}
+              onChange={(e) => setRepoToken(e.target.value)}
+              placeholder={
+                hasExistingToken
+                  ? '•••••••• (laat leeg om huidige token te behouden)'
+                  : 'ghp_… of github_pat_…'
+              }
+              autoComplete="off"
+            />
+            <p className="mt-1 text-[10px] text-muted-foreground">
+              Vereist voor private repos. Token wordt encrypted opgeslagen en alleen gebruikt om{' '}
+              <code>git clone</code> uit te voeren als{' '}
+              <code>x-access-token:&lt;token&gt;@github.com/…</code>. Voor GitHub: maak een fine-grained
+              PAT met <code>Contents: read</code> op de betreffende repo.
             </p>
           </div>
           <div>

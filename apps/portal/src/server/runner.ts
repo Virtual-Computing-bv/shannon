@@ -13,7 +13,7 @@
 import { execa } from 'execa';
 import fs from 'node:fs';
 import path from 'node:path';
-import { db } from './db.js';
+import { db, decrypt } from './db.js';
 import { decryptedAnthropicKey } from './settings.js';
 import type { ScanStatus } from '../shared/types.js';
 
@@ -39,12 +39,33 @@ function setStatus(scanId: string, status: ScanStatus, extra?: { error?: string;
   }
 }
 
+/**
+ * Inject a Git access token into an HTTPS clone URL so we can shallow-clone
+ * private GitHub/GitLab/Gitea repos without writing the secret to disk in
+ * plaintext. For GitHub PATs the canonical form is
+ * `https://x-access-token:<TOKEN>@github.com/org/repo.git`. We also support
+ * URLs where the user already embedded credentials (we leave those alone).
+ */
+function injectGitToken(repoUrl: string, token: string): string {
+  try {
+    const u = new URL(repoUrl);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return repoUrl;
+    if (u.username || u.password) return repoUrl;
+    u.username = 'x-access-token';
+    u.password = token;
+    return u.toString();
+  } catch {
+    return repoUrl;
+  }
+}
+
 export async function runScan(scanId: string, targetId: string): Promise<void> {
   const target = db.prepare(`SELECT * FROM targets WHERE id=?`).get(targetId) as
     | {
         id: string;
         url: string;
         repo_url: string;
+        repo_token_enc: string | null;
         config_yaml: string | null;
       }
     | undefined;
@@ -71,8 +92,20 @@ export async function runScan(scanId: string, targetId: string): Promise<void> {
 
   try {
     setStatus(scanId, 'cloning');
+    let cloneUrl = target.repo_url;
+    if (target.repo_token_enc) {
+      try {
+        const token = decrypt(target.repo_token_enc);
+        cloneUrl = injectGitToken(target.repo_url, token);
+      } catch {
+        // Encryption key changed or row corrupted — fall back to bare URL
+        // and let git fail loudly rather than half-attempting auth.
+        log('WARNING: stored Git access token could not be decrypted, cloning without auth');
+      }
+    }
+    // Never log the token-embedded URL.
     log(`Cloning ${target.repo_url} → ${repoDir}`);
-    await execa('git', ['clone', '--depth=1', target.repo_url, repoDir], {
+    await execa('git', ['clone', '--depth=1', cloneUrl, repoDir], {
       stdout: logStream,
       stderr: logStream,
     });

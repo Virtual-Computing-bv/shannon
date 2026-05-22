@@ -35,6 +35,7 @@ db.exec(`
     url TEXT NOT NULL,
     repo_source TEXT NOT NULL DEFAULT 'github-url',
     repo_url TEXT NOT NULL,
+    repo_token_enc TEXT,
     config_yaml TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -53,6 +54,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS scans_target_idx ON scans (target_id);
   CREATE INDEX IF NOT EXISTS scans_status_idx ON scans (status);
 `);
+
+// Idempotent migration for DBs created before the encrypted PAT column existed.
+// node:sqlite has no IF NOT EXISTS for ADD COLUMN, so we probe pragma_table_info.
+const hasRepoToken = (
+  db
+    .prepare(`SELECT 1 AS n FROM pragma_table_info('targets') WHERE name='repo_token_enc'`)
+    .get() as { n: number } | undefined
+)?.n === 1;
+if (!hasRepoToken) {
+  db.exec(`ALTER TABLE targets ADD COLUMN repo_token_enc TEXT`);
+}
 
 // AES-256-GCM with a key derived from $NAHAYAT_ENCRYPTION_KEY (or a stable
 // per-DB key auto-generated on first launch). Used for the Anthropic API

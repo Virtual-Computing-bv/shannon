@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
-import { db } from './db.js';
+import { db, encrypt } from './db.js';
 import { markAdminInitialized, publicSettings, setAnthropicKey } from './settings.js';
 import { logTail, reportPath, runScan } from './runner.js';
 import type { Scan, ScanWithTarget, Target } from '../shared/types.js';
@@ -114,6 +114,11 @@ const TargetBody = z.object({
   url: z.string().url(),
   repoSource: z.enum(['github-url', 'local-path']).default('github-url'),
   repoUrl: z.string().min(1),
+  /**
+   * Optional GitHub/Git PAT used to clone private repos. Never echoed back to
+   * clients. Empty string → clear stored token; undefined → leave as-is.
+   */
+  repoToken: z.string().nullable().optional(),
   configYaml: z.string().nullable().optional(),
 });
 
@@ -124,6 +129,7 @@ router.get('/targets', requireAuth, (_req, res) => {
     url: string;
     repo_source: 'github-url' | 'local-path';
     repo_url: string;
+    repo_token_enc: string | null;
     config_yaml: string | null;
     created_at: string;
     updated_at: string;
@@ -134,6 +140,7 @@ router.get('/targets', requireAuth, (_req, res) => {
     url: r.url,
     repoSource: r.repo_source,
     repoUrl: r.repo_url,
+    repoTokenSet: !!r.repo_token_enc,
     configYaml: r.config_yaml,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -148,15 +155,18 @@ router.post('/targets', requireAuth, (req, res) => {
     return;
   }
   const id = crypto.randomUUID();
+  const tokenPlain = parsed.data.repoToken?.trim();
+  const tokenEnc = tokenPlain ? encrypt(tokenPlain) : null;
   db.prepare(
-    `INSERT INTO targets (id, name, url, repo_source, repo_url, config_yaml)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO targets (id, name, url, repo_source, repo_url, repo_token_enc, config_yaml)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     parsed.data.name,
     parsed.data.url,
     parsed.data.repoSource,
     parsed.data.repoUrl,
+    tokenEnc,
     parsed.data.configYaml ?? null,
   );
   res.json({ id });
@@ -179,6 +189,16 @@ router.put('/targets/:id', requireAuth, (req, res) => {
   if (fields.url !== undefined) { sets.push('url=?'); vals.push(fields.url); }
   if (fields.repoUrl !== undefined) { sets.push('repo_url=?'); vals.push(fields.repoUrl); }
   if (fields.repoSource !== undefined) { sets.push('repo_source=?'); vals.push(fields.repoSource); }
+  // repoToken === null  → clear stored token
+  // repoToken === ''    → no change (form leaves blank when keeping existing)
+  // repoToken === '...' → encrypt + replace
+  if (fields.repoToken === null) {
+    sets.push('repo_token_enc=?');
+    vals.push(null);
+  } else if (typeof fields.repoToken === 'string' && fields.repoToken.trim() !== '') {
+    sets.push('repo_token_enc=?');
+    vals.push(encrypt(fields.repoToken.trim()));
+  }
   if (fields.configYaml !== undefined) { sets.push('config_yaml=?'); vals.push(fields.configYaml); }
   if (sets.length === 0) {
     res.json({ ok: true });
