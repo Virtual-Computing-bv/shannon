@@ -1,13 +1,14 @@
-# Nahayat Pentest portal — bundles the Shannon CLI + our admin portal in
-# one image. Customer-deployed container talks to a DinD sidecar via
-# DOCKER_HOST=tcp://shannon-dind:2375; Shannon's CLI then brings up its own
-# Temporal + worker inside that DinD so nothing leaks onto the swarm host.
+# Nahayat Pentest portal — bundles the Shannon portal UI/server AND the
+# Shannon worker runtime in a single image. No Docker socket, no DinD, no
+# privileged sidecars — strict swarm-native.
+#
+# The portal spawns the worker (apps/worker/dist/temporal/worker.js) as a
+# Node child process. The worker connects to a non-privileged `temporal`
+# swarm sidecar at $TEMPORAL_ADDRESS (default shannon-temporal:7233).
 
-# ── Stage 1: build the monorepo (CLI bundle + portal web/server) ─────────────
-# Debian-slim base (glibc) — alpine/musl prebuilds for better-sqlite3 +
-# friends are flakier and have hit "Could not locate the bindings file"
-# multiple times in CI. The size delta is ~50MB, easily worth predictable
-# native deps.
+# ── Stage 1: build the monorepo (portal web/server + worker dist) ────────────
+# Debian-slim base (glibc) — alpine/musl prebuilds for native deps are
+# flakier. The size delta is worth predictable native modules.
 FROM node:22-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -24,93 +25,107 @@ COPY apps/portal/package.json ./apps/portal/
 COPY apps/worker/package.json ./apps/worker/
 COPY tsconfig.base.json ./
 
-# Install all deps (incl. dev) so we can build both CLI and portal.
+# Install all deps (incl. dev) so we can build everything.
 RUN pnpm install --frozen-lockfile
 
 # Now bring in the rest of the source.
 COPY . .
 
-# Build the CLI bundle (tsdown → apps/cli/dist/index.mjs + infra/).
+# Build the worker (TypeScript → dist/), portal UI/server, and CLI bundle
+# (we still ship the CLI binary for debugging — not on the runtime hot path).
+RUN pnpm --filter @shannon/worker run build
+RUN pnpm --filter @nahayat/pentest-portal run build
 RUN pnpm --filter @keygraph/shannon run build
 
-# Build the portal (Vite for the React UI, tsc for the Express server).
-RUN pnpm --filter @nahayat/pentest-portal run build
-
-# Explicitly rebuild native modules so the .node binaries land in
-# node_modules/.pnpm/<pkg>/.../build/ for the runtime stage to copy.
+# Explicitly rebuild native modules so .node binaries land where the
+# runtime stage can copy them.
 RUN pnpm rebuild
 
-# NOTE: we don't strip devDeps for a prod-only install — pnpm's --prod
-# pass has skipped install scripts in CI, leaving better-sqlite3 without
-# its native binding. Carrying ~30MB extra of dev tooling is the cheaper
-# trade than another debugging round-trip.
-
 # ── Stage 2: runtime image ───────────────────────────────────────────────────
+# Includes Chromium (for playwright-cli), git, and the worker's Node runtime
+# deps. No Docker CLI, no daemon, no socket.
 FROM node:22-slim AS runtime
 
 # Runtime tools:
-#   git                — shallow-clone customer repos
-#   bash + ca-certificates + curl — entrypoint + outbound HTTPS
-#   docker static CLI  — talk to remote DinD/socket (no daemon needed here)
-ARG DOCKER_CLI_VERSION=27.3.1
+#   git/curl/bash/ca-certs — clone customer repos + outbound HTTPS.
+#   chromium               — playwright-cli launches headless browser sessions.
+#   fonts-liberation       — chromium needs a font set or text renders empty.
+#   The chromium deps (libnss3, libatk, libdrm, libxkbcommon, etc.) come in
+#   transitively when apt installs the chromium meta-package on debian-slim.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       bash git ca-certificates curl \
-    && curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
-        | tar -xz -C /tmp \
-    && mv /tmp/docker/docker /usr/local/bin/docker \
-    && chmod +x /usr/local/bin/docker \
-    && rm -rf /tmp/docker /var/lib/apt/lists/*
+      chromium fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy node_modules + built portal + shannon CLI bundle.
+# Copy node_modules + built portal + worker dist + CLI bundle.
 COPY --from=builder /build/node_modules ./node_modules
 COPY --from=builder /build/apps/portal/dist ./apps/portal/dist
 COPY --from=builder /build/apps/portal/node_modules ./apps/portal/node_modules
+COPY --from=builder /build/apps/worker/dist ./apps/worker/dist
+COPY --from=builder /build/apps/worker/node_modules ./apps/worker/node_modules
+COPY --from=builder /build/apps/worker/prompts ./apps/worker/prompts
+COPY --from=builder /build/apps/worker/configs ./apps/worker/configs
+COPY --from=builder /build/apps/worker/package.json ./apps/worker/package.json
 COPY --from=builder /build/apps/cli/dist ./apps/cli/dist
 COPY --from=builder /build/apps/cli/infra ./apps/cli/infra
 COPY --from=builder /build/apps/cli/package.json ./apps/cli/package.json
-# tsdown leaves CLI runtime deps (chokidar, @clack/prompts, dotenv, smol-toml)
-# as external imports. pnpm creates per-workspace symlinks under
-# apps/cli/node_modules that point into the root .pnpm store — Node's
-# resolver walks up from /app/apps/cli/dist/index.mjs and needs them there.
 COPY --from=builder /build/apps/cli/node_modules ./apps/cli/node_modules
 COPY --from=builder /build/shannon ./shannon
 COPY --from=builder /build/package.json ./package.json
+COPY --from=builder /build/pnpm-workspace.yaml ./pnpm-workspace.yaml
 
-# Make the shannon entry script executable + ensure it doesn't try to set
-# SHANNON_LOCAL=1 (we want npx-mode: pull worker image from Docker Hub).
+# Make the shannon CLI script executable (kept around for debugging).
 RUN chmod +x /app/shannon
 
+# Install claude-code + playwright-cli globally so the worker can find them
+# on PATH (the same versions used by the upstream worker image). Pinned to
+# match Dockerfile at repo root to keep behaviour identical.
+RUN npm install -g --ignore-scripts @anthropic-ai/claude-code@2.1.84 @playwright/cli@0.1.1
+
+# Pre-warm Playwright's skills directory so SDK agents that invoke
+# `playwright-cli` find the skill plugin without trying to write to
+# read-only paths at runtime.
+RUN mkdir -p /tmp/.claude/skills && \
+    playwright-cli install --skills && \
+    cp -r .claude/skills/playwright-cli /tmp/.claude/skills/ && \
+    rm -rf .claude
+
+# Symlink the worker's CLI helpers onto PATH (used by agent prompts).
+RUN ln -s /app/apps/worker/dist/scripts/save-deliverable.js /usr/local/bin/save-deliverable && \
+    chmod +x /app/apps/worker/dist/scripts/save-deliverable.js && \
+    ln -s /app/apps/worker/dist/scripts/generate-totp.js /usr/local/bin/generate-totp && \
+    chmod +x /app/apps/worker/dist/scripts/generate-totp.js
+
+# System-level git config so the worker's deliverables-repo commits work
+# regardless of which UID the container runs as.
+RUN git config --system user.email "agent@localhost" && \
+    git config --system user.name "Pentest Agent" && \
+    git config --system --add safe.directory '*'
+
 # State volume lives at /data (sqlite, sessions, cloned repos, scan logs,
-# Shannon's ~/.shannon/, downloaded worker image cache, reports).
+# Shannon's workspaces dir, reports).
 ENV NAHAYAT_DATA_DIR=/data \
     SHANNON_DIR=/app \
     HOME=/data/.home \
     PORT=3001 \
-    NODE_ENV=production
+    NODE_ENV=production \
+    TEMPORAL_ADDRESS=shannon-temporal:7233 \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    PLAYWRIGHT_MCP_EXECUTABLE_PATH=/usr/bin/chromium \
+    SHANNON_DOCKER=true
 
-# Default DOCKER_HOST points at the DinD sidecar — control-plane sidecar
-# wiring will override this if the customer renames the service.
-ENV DOCKER_HOST=tcp://shannon-dind:2375
-
-# Pre-built worker image lives on GHCR. Shannon CLI honours this env var and
-# `docker pull`s it instead of trying to `docker build .` (the runtime image
-# carries no Dockerfile/source tree). Built by .github/workflows/build-shannon-worker.yml.
-ENV SHANNON_WORKER_IMAGE=ghcr.io/virtual-computing-bv/shannon-worker:latest
-
-# Non-root user. Shannon's CLI hard-blocks UID 0 (see apps/cli/src/index.ts
-# blockSudo()). We talk to the DinD sidecar over TCP, not the host socket,
-# so no group-membership games are needed — DOCKER_HOST is enough.
+# Non-root user. Matches the worker image's UID 1001 so any deliverable
+# git history written by the worker is owned consistently.
 RUN groupadd --system --gid 1001 scanner \
     && useradd  --system --uid 1001 --gid scanner --home /data/.home --shell /bin/bash scanner \
     && mkdir -p /data/.home /data/repos /data/reports /data/logs /data/workspaces \
-    && chown -R scanner:scanner /data /app
+    && chown -R scanner:scanner /data /app /tmp/.claude
 
 EXPOSE 3001
 
-# Wait briefly for DinD to come up on first launch — DinD takes 5-15s to
-# start the daemon, and Shannon's CLI fails fast if it can't talk to docker.
+# Lightweight entrypoint — no docker daemon probe, no GHCR login.
 COPY apps/portal/docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
 

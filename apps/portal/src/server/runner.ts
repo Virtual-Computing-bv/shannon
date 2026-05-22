@@ -1,13 +1,21 @@
 /**
- * Spawns a Shannon scan by shelling out to the bundled `shannon` CLI. The
- * Docker socket points at the DinD sidecar (DOCKER_HOST=tcp://shannon-dind:2375)
- * so the ephemeral worker container runs inside our isolated deploy, not on
- * the swarm host.
+ * Spawns a Shannon scan by running the worker entrypoint as an in-process
+ * Node child process — no Docker, no DinD, no privileged containers.
  *
- * Output layout:
- *   /repos/<scan-id>/             — cloned source for this scan (read-only mount inside worker)
+ * Architecture:
+ *   - portal container bundles worker dist + chromium + claude-code CLI +
+ *     playwright-cli + save-deliverable + generate-totp (see Dockerfile).
+ *   - A non-privileged `temporal` swarm sidecar provides the gRPC server at
+ *     TEMPORAL_ADDRESS=shannon-temporal:7233.
+ *   - This module spawns `node apps/worker/dist/temporal/worker.js` directly.
+ *     The worker connects to Temporal, registers itself, submits the workflow,
+ *     waits for completion, exits — exactly like before, just without the
+ *     `docker run` indirection.
+ *
+ * Output layout (unchanged):
+ *   /repos/<scan-id>/             — cloned source for this scan
  *   /workspaces/<scan-id>/        — Shannon's session/deliverables dir
- *   /reports/<scan-id>/           — final report copied via Shannon's -o flag
+ *   /reports/<scan-id>/           — final report copied via --output flag
  *   /logs/<scan-id>.log           — combined stdout+stderr
  */
 import { execa } from 'execa';
@@ -24,6 +32,8 @@ const LOGS_DIR = path.join(DATA_DIR, 'logs');
 const WORKSPACES_DIR = path.join(DATA_DIR, 'workspaces');
 
 const SHANNON_DIR = process.env.SHANNON_DIR ?? '/app';
+const WORKER_ENTRY = path.join(SHANNON_DIR, 'apps/worker/dist/temporal/worker.js');
+const TEMPORAL_ADDRESS = process.env.TEMPORAL_ADDRESS ?? 'shannon-temporal:7233';
 
 for (const d of [REPOS_DIR, REPORTS_DIR, LOGS_DIR, WORKSPACES_DIR]) {
   fs.mkdirSync(d, { recursive: true });
@@ -57,6 +67,15 @@ function injectGitToken(repoUrl: string, token: string): string {
   } catch {
     return repoUrl;
   }
+}
+
+/**
+ * Generate an 8-char hex suffix for the per-scan Temporal task queue.
+ * Replaces the CLI's randomSuffix() helper — we don't import from the CLI
+ * here because the CLI bundle is not in the portal's module graph.
+ */
+function randomSuffix(): string {
+  return Math.random().toString(16).slice(2, 10).padEnd(8, '0');
 }
 
 export async function runScan(scanId: string, targetId: string): Promise<void> {
@@ -97,7 +116,9 @@ export async function runScan(scanId: string, targetId: string): Promise<void> {
 
   const repoDir = path.join(REPOS_DIR, scanId);
   const reportDir = path.join(REPORTS_DIR, scanId);
+  const workspaceDir = path.join(WORKSPACES_DIR, scanId);
   fs.mkdirSync(reportDir, { recursive: true });
+  fs.mkdirSync(workspaceDir, { recursive: true });
 
   try {
     setStatus(scanId, 'cloning');
@@ -119,6 +140,14 @@ export async function runScan(scanId: string, targetId: string): Promise<void> {
       stderr: logStream,
     });
 
+    // Pre-create overlay mount points so the worker's path-resolution logic
+    // (which expects .shannon/* dirs inside the cloned repo) doesn't trip.
+    const shannonRepoDir = path.join(repoDir, '.shannon');
+    for (const sub of ['deliverables', 'scratchpad', '.playwright-cli']) {
+      fs.mkdirSync(path.join(shannonRepoDir, sub), { recursive: true });
+    }
+    fs.mkdirSync(path.join(repoDir, '.playwright'), { recursive: true });
+
     let configPath: string | undefined;
     if (target.config_yaml && target.config_yaml.trim().length > 0) {
       configPath = path.join(repoDir, '.nahayat-config.yaml');
@@ -126,18 +155,51 @@ export async function runScan(scanId: string, targetId: string): Promise<void> {
     }
 
     setStatus(scanId, 'pre-recon');
-    log(`Starting Shannon: target=${target.url} repo=${repoDir} workspace=${scanId}`);
-    const args = ['start', '-u', target.url, '-r', repoDir, '-w', scanId, '-o', reportDir];
-    if (configPath) args.push('-c', configPath);
+    log(`Starting Shannon worker (in-process): target=${target.url} repo=${repoDir} workspace=${scanId}`);
 
-    // Spawn the CLI in pipe mode so we can both write to the log file AND
-    // sniff stdout for heuristic phase detection.
-    const child = execa('./shannon', args, {
+    // The worker entry's CWD must contain ./workspaces because all of its
+    // session.json paths are computed relative to that. Stage a symlink so
+    // the worker writes into our /data/workspaces (NFS-backed) tree.
+    const workspacesLinkParent = path.join(SHANNON_DIR);
+    const workspacesLink = path.join(workspacesLinkParent, 'workspaces');
+    try {
+      const stat = fs.lstatSync(workspacesLink);
+      if (!stat.isSymbolicLink()) {
+        // pre-existing real directory (from the worker image build); replace.
+        fs.rmSync(workspacesLink, { recursive: true, force: true });
+        fs.symlinkSync(WORKSPACES_DIR, workspacesLink, 'dir');
+      }
+    } catch {
+      fs.symlinkSync(WORKSPACES_DIR, workspacesLink, 'dir');
+    }
+
+    const taskQueue = `shannon-${randomSuffix()}`;
+    const args = [
+      WORKER_ENTRY,
+      target.url,
+      repoDir,
+      '--task-queue',
+      taskQueue,
+      '--workspace',
+      scanId,
+      '--output',
+      reportDir,
+    ];
+    if (configPath) {
+      args.push('--config', configPath);
+    }
+
+    const child = execa('node', args, {
       cwd: SHANNON_DIR,
       env: {
         ...process.env,
-        SHANNON_LOCAL: '1',
         ANTHROPIC_API_KEY: anthropicKey,
+        TEMPORAL_ADDRESS,
+        // The worker's claude-executor relies on the `claude` CLI being on
+        // PATH (installed globally via npm in the Dockerfile). PATH inherited
+        // from the parent process; nothing to do here. Same for playwright-cli.
+        SHANNON_DOCKER: 'true',
+        PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1',
       },
     });
 
