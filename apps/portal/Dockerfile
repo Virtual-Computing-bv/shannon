@@ -70,6 +70,11 @@ COPY --from=builder /build/apps/portal/node_modules ./apps/portal/node_modules
 COPY --from=builder /build/apps/cli/dist ./apps/cli/dist
 COPY --from=builder /build/apps/cli/infra ./apps/cli/infra
 COPY --from=builder /build/apps/cli/package.json ./apps/cli/package.json
+# tsdown leaves CLI runtime deps (chokidar, @clack/prompts, dotenv, smol-toml)
+# as external imports. pnpm creates per-workspace symlinks under
+# apps/cli/node_modules that point into the root .pnpm store — Node's
+# resolver walks up from /app/apps/cli/dist/index.mjs and needs them there.
+COPY --from=builder /build/apps/cli/node_modules ./apps/cli/node_modules
 COPY --from=builder /build/shannon ./shannon
 COPY --from=builder /build/package.json ./package.json
 
