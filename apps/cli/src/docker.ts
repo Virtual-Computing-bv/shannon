@@ -18,7 +18,22 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const NPX_IMAGE_REPO = 'keygraph/shannon';
 const DEV_IMAGE = 'shannon-worker';
 
+/**
+ * SHANNON_WORKER_IMAGE overrides both modes — when set, Shannon will neither
+ * build locally nor pull from Docker Hub, but pull this exact tag from
+ * whatever registry it points at. Used by the Nahayat portal to consume a
+ * pre-built worker image from GHCR inside a DinD sidecar (where there's no
+ * Dockerfile/source tree to build from, and Docker Hub's `keygraph/shannon`
+ * isn't the right artifact).
+ */
+function getWorkerImageOverride(): string | undefined {
+  const v = process.env.SHANNON_WORKER_IMAGE;
+  return v && v.trim().length > 0 ? v.trim() : undefined;
+}
+
 export function getWorkerImage(version: string): string {
+  const override = getWorkerImageOverride();
+  if (override) return override;
   return getMode() === 'local' ? DEV_IMAGE : `${NPX_IMAGE_REPO}:${version}`;
 }
 
@@ -108,11 +123,27 @@ export function buildImage(noCache: boolean): void {
 /**
  * Ensure the worker image is available.
  * Local mode: auto-builds if missing. NPX mode: pulls from Docker Hub.
+ * If SHANNON_WORKER_IMAGE is set, always pull that exact tag — never build.
  */
 export function ensureImage(version: string): void {
   const image = getWorkerImage(version);
   const exists = runQuiet('docker', ['image', 'inspect', image]);
   if (exists) return;
+
+  const override = getWorkerImageOverride();
+  if (override) {
+    console.log(`Pulling ${image}...`);
+    try {
+      execFileSync('docker', ['pull', image], { stdio: 'inherit' });
+    } catch {
+      console.error(`\nERROR: Failed to pull ${image}`);
+      console.error(
+        'SHANNON_WORKER_IMAGE is set but the daemon could not pull the tag. Verify the registry is reachable and (if private) that `docker login` ran on this daemon.',
+      );
+      process.exit(1);
+    }
+    return;
+  }
 
   if (getMode() === 'local') {
     console.log('Worker image not found, building...');

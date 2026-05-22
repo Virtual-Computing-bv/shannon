@@ -94,6 +94,11 @@ ENV NAHAYAT_DATA_DIR=/data \
 # wiring will override this if the customer renames the service.
 ENV DOCKER_HOST=tcp://shannon-dind:2375
 
+# Pre-built worker image lives on GHCR. Shannon CLI honours this env var and
+# `docker pull`s it instead of trying to `docker build .` (the runtime image
+# carries no Dockerfile/source tree). Built by .github/workflows/build-shannon-worker.yml.
+ENV SHANNON_WORKER_IMAGE=ghcr.io/virtual-computing-bv/shannon-worker:latest
+
 # Non-root user. Shannon's CLI hard-blocks UID 0 (see apps/cli/src/index.ts
 # blockSudo()). We talk to the DinD sidecar over TCP, not the host socket,
 # so no group-membership games are needed — DOCKER_HOST is enough.
