@@ -39,14 +39,20 @@ export const Api = {
   settings: () => api<Settings>('/settings'),
   saveSettings: (anthropicApiKey: string | null) =>
     api<Settings>('/settings', { method: 'PUT', body: JSON.stringify({ anthropicApiKey }) }),
+  saveGithubToken: (githubToken: string | null) =>
+    api<Settings>('/settings', { method: 'PUT', body: JSON.stringify({ githubToken }) }),
+  testGithubToken: () =>
+    api<{ ok: boolean; login?: string | null; scopes?: string | null; status?: number; error?: string }>(
+      '/settings/github/test',
+      { method: 'POST' },
+    ),
 
   listTargets: () => api<{ data: Target[] }>('/targets').then((r) => r.data),
   createTarget: (body: Omit<Target, 'id' | 'createdAt' | 'updatedAt'>) =>
     api<{ id: string }>('/targets', { method: 'POST', body: JSON.stringify(body) }),
   updateTarget: (id: string, body: Partial<Omit<Target, 'id'>>) =>
     api<{ ok: true }>(`/targets/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
-  deleteTarget: (id: string) =>
-    api<{ ok: true }>(`/targets/${id}`, { method: 'DELETE' }),
+  deleteTarget: (id: string) => api<{ ok: true }>(`/targets/${id}`, { method: 'DELETE' }),
 
   listScans: () => api<{ data: ScanWithTarget[] }>('/scans').then((r) => r.data),
   startScan: (targetId: string) =>

@@ -7,11 +7,17 @@ export function Targets() {
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Target | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Tracks whether a global GitHub token is set — used to show the
+  // "Using global token from Settings" hint on per-target rows that have no
+  // per-target token of their own.
+  const [globalGithubTokenSet, setGlobalGithubTokenSet] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      setTargets(await Api.listTargets());
+      const [list, settings] = await Promise.all([Api.listTargets(), Api.settings()]);
+      setTargets(list);
+      setGlobalGithubTokenSet(settings.githubTokenConfigured);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -74,11 +80,18 @@ export function Targets() {
                   <div className="flex items-center gap-2 flex-wrap">
                     <h3 className="text-lg font-semibold">{t.name}</h3>
                     <span className="badge">{t.repoSource}</span>
-                    {t.repoTokenSet && (
+                    {t.repoTokenSet ? (
                       <span className="badge" title="Encrypted Git access token opgeslagen">
                         token
                       </span>
-                    )}
+                    ) : globalGithubTokenSet ? (
+                      <span
+                        className="badge"
+                        title="Geen target-specifieke token — valt terug op globale token uit Settings"
+                      >
+                        global token
+                      </span>
+                    ) : null}
                   </div>
                   <a
                     href={t.url}
@@ -238,10 +251,12 @@ function TargetForm({
               autoComplete="off"
             />
             <p className="mt-1 text-[10px] text-muted-foreground">
-              Vereist voor private repos. Token wordt encrypted opgeslagen en alleen gebruikt om{' '}
-              <code>git clone</code> uit te voeren als{' '}
-              <code>x-access-token:&lt;token&gt;@github.com/…</code>. Voor GitHub: maak een fine-grained
-              PAT met <code>Contents: read</code> op de betreffende repo.
+              Optioneel — laat leeg om de globale GitHub token uit{' '}
+              <strong>Settings</strong> te gebruiken. Vul hier alleen iets in als deze target
+              een afwijkende PAT nodig heeft. Token wordt encrypted opgeslagen en alleen
+              gebruikt om <code>git clone</code> uit te voeren als{' '}
+              <code>x-access-token:&lt;token&gt;@github.com/…</code>. Voor GitHub: maak een
+              fine-grained PAT met <code>Contents: read</code> op de betreffende repo.
             </p>
           </div>
           <div>

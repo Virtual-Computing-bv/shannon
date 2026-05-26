@@ -1,13 +1,19 @@
-import express, { type Router as ExpressRouter } from 'express';
-import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import bcrypt from 'bcryptjs';
+import express, { type Router as ExpressRouter } from 'express';
 import { z } from 'zod';
-import { db, encrypt } from './db.js';
-import { markAdminInitialized, publicSettings, setAnthropicKey } from './settings.js';
-import { logTail, reportPath, runScan, stopScan } from './runner.js';
 import type { Scan, ScanWithTarget, Target } from '../shared/types.js';
+import { db, encrypt } from './db.js';
+import { logTail, reportPath, runScan, stopScan } from './runner.js';
+import {
+  decryptedGithubToken,
+  markAdminInitialized,
+  publicSettings,
+  setAnthropicKey,
+  setGithubToken,
+} from './settings.js';
 
 declare module 'express-session' {
   interface SessionData {
@@ -52,9 +58,7 @@ router.post('/setup', async (req, res) => {
     return;
   }
   const hash = await bcrypt.hash(parsed.data.password, 12);
-  const info = db
-    .prepare(`INSERT INTO users (username, password_hash) VALUES (?, ?)`)
-    .run(parsed.data.username, hash);
+  const info = db.prepare(`INSERT INTO users (username, password_hash) VALUES (?, ?)`).run(parsed.data.username, hash);
   markAdminInitialized();
   req.session.userId = Number(info.lastInsertRowid);
   req.session.username = parsed.data.username;
@@ -72,9 +76,9 @@ router.post('/login', async (req, res) => {
     res.status(400).json({ error: 'invalid' });
     return;
   }
-  const row = db
-    .prepare(`SELECT id, password_hash FROM users WHERE username=?`)
-    .get(parsed.data.username) as { id: number; password_hash: string } | undefined;
+  const row = db.prepare(`SELECT id, password_hash FROM users WHERE username=?`).get(parsed.data.username) as
+    | { id: number; password_hash: string }
+    | undefined;
   if (!row || !(await bcrypt.compare(parsed.data.password, row.password_hash))) {
     res.status(401).json({ error: 'bad credentials' });
     return;
@@ -95,6 +99,7 @@ router.get('/settings', requireAuth, (_req, res) => {
 
 const SettingsBody = z.object({
   anthropicApiKey: z.string().nullable().optional(),
+  githubToken: z.string().nullable().optional(),
 });
 router.put('/settings', requireAuth, (req, res) => {
   const parsed = SettingsBody.safeParse(req.body);
@@ -105,7 +110,44 @@ router.put('/settings', requireAuth, (req, res) => {
   if (parsed.data.anthropicApiKey !== undefined) {
     setAnthropicKey(parsed.data.anthropicApiKey);
   }
+  if (parsed.data.githubToken !== undefined) {
+    setGithubToken(parsed.data.githubToken);
+  }
   res.json(publicSettings());
+});
+
+// Test connectivity for the configured global GitHub token. Calls
+// https://api.github.com/user and reports back the login + scopes header.
+// Never echoes the raw token. Used by the Settings UI "Test connection" button.
+router.post('/settings/github/test', requireAuth, async (_req, res) => {
+  const token = decryptedGithubToken();
+  if (!token) {
+    res.status(400).json({ ok: false, error: 'no global token configured' });
+    return;
+  }
+  try {
+    const resp = await fetch('https://api.github.com/user', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'nahayat-pentest-portal',
+      },
+    });
+    if (!resp.ok) {
+      res.status(200).json({ ok: false, status: resp.status, error: resp.statusText });
+      return;
+    }
+    const body = (await resp.json()) as { login?: string };
+    res.json({
+      ok: true,
+      login: body.login ?? null,
+      scopes: resp.headers.get('x-oauth-scopes'),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
 });
 
 // ── Targets ──
@@ -185,10 +227,22 @@ router.put('/targets/:id', requireAuth, (req, res) => {
   // gymnastics at every push site.
   const sets: string[] = [];
   const vals: Array<string | number | null> = [];
-  if (fields.name !== undefined) { sets.push('name=?'); vals.push(fields.name); }
-  if (fields.url !== undefined) { sets.push('url=?'); vals.push(fields.url); }
-  if (fields.repoUrl !== undefined) { sets.push('repo_url=?'); vals.push(fields.repoUrl); }
-  if (fields.repoSource !== undefined) { sets.push('repo_source=?'); vals.push(fields.repoSource); }
+  if (fields.name !== undefined) {
+    sets.push('name=?');
+    vals.push(fields.name);
+  }
+  if (fields.url !== undefined) {
+    sets.push('url=?');
+    vals.push(fields.url);
+  }
+  if (fields.repoUrl !== undefined) {
+    sets.push('repo_url=?');
+    vals.push(fields.repoUrl);
+  }
+  if (fields.repoSource !== undefined) {
+    sets.push('repo_source=?');
+    vals.push(fields.repoSource);
+  }
   // repoToken === null  → clear stored token
   // repoToken === ''    → no change (form leaves blank when keeping existing)
   // repoToken === '...' → encrypt + replace
@@ -199,7 +253,10 @@ router.put('/targets/:id', requireAuth, (req, res) => {
     sets.push('repo_token_enc=?');
     vals.push(encrypt(fields.repoToken.trim()));
   }
-  if (fields.configYaml !== undefined) { sets.push('config_yaml=?'); vals.push(fields.configYaml); }
+  if (fields.configYaml !== undefined) {
+    sets.push('config_yaml=?');
+    vals.push(fields.configYaml);
+  }
   if (sets.length === 0) {
     res.json({ ok: true });
     return;
@@ -222,18 +279,18 @@ router.post('/scans', requireAuth, (req, res) => {
     res.status(400).json({ error: 'invalid' });
     return;
   }
-  const target = db
-    .prepare(`SELECT id FROM targets WHERE id=?`)
-    .get(body.data.targetId) as { id: string } | undefined;
+  const target = db.prepare(`SELECT id FROM targets WHERE id=?`).get(body.data.targetId) as { id: string } | undefined;
   if (!target) {
     res.status(404).json({ error: 'target not found' });
     return;
   }
   const id = crypto.randomUUID();
   const workspace = id;
-  db.prepare(
-    `INSERT INTO scans (id, target_id, status, workspace) VALUES (?, ?, 'pending', ?)`,
-  ).run(id, body.data.targetId, workspace);
+  db.prepare(`INSERT INTO scans (id, target_id, status, workspace) VALUES (?, ?, 'pending', ?)`).run(
+    id,
+    body.data.targetId,
+    workspace,
+  );
 
   // Fire-and-forget. The runner updates status as it progresses.
   void runScan(id, body.data.targetId).catch((err) => {
@@ -252,17 +309,17 @@ router.get('/scans', requireAuth, (_req, res) => {
        LIMIT 200`,
     )
     .all() as Array<{
-      id: string;
-      target_id: string;
-      status: Scan['status'];
-      workspace: string;
-      started_at: string;
-      finished_at: string | null;
-      exit_code: number | null;
-      error: string | null;
-      t_name: string;
-      t_url: string;
-    }>;
+    id: string;
+    target_id: string;
+    status: Scan['status'];
+    workspace: string;
+    started_at: string;
+    finished_at: string | null;
+    exit_code: number | null;
+    error: string | null;
+    t_name: string;
+    t_url: string;
+  }>;
   const scans: ScanWithTarget[] = rows.map((r) => ({
     id: r.id,
     targetId: r.target_id,

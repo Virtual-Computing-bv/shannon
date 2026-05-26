@@ -1,7 +1,7 @@
-import { DatabaseSync } from 'node:sqlite';
-import path from 'node:path';
-import fs from 'node:fs';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 const DATA_DIR = process.env.NAHAYAT_DATA_DIR ?? '/data';
 const DB_PATH = process.env.NAHAYAT_DB_PATH ?? path.join(DATA_DIR, 'portal.db');
@@ -57,11 +57,12 @@ db.exec(`
 
 // Idempotent migration for DBs created before the encrypted PAT column existed.
 // node:sqlite has no IF NOT EXISTS for ADD COLUMN, so we probe pragma_table_info.
-const hasRepoToken = (
-  db
-    .prepare(`SELECT 1 AS n FROM pragma_table_info('targets') WHERE name='repo_token_enc'`)
-    .get() as { n: number } | undefined
-)?.n === 1;
+const hasRepoToken =
+  (
+    db.prepare(`SELECT 1 AS n FROM pragma_table_info('targets') WHERE name='repo_token_enc'`).get() as
+      | { n: number }
+      | undefined
+  )?.n === 1;
 if (!hasRepoToken) {
   db.exec(`ALTER TABLE targets ADD COLUMN repo_token_enc TEXT`);
 }
@@ -74,9 +75,9 @@ const ENC_KEY = deriveEncKey();
 function deriveEncKey(): Buffer {
   const explicit = process.env.NAHAYAT_ENCRYPTION_KEY;
   if (explicit) return crypto.createHash('sha256').update(explicit).digest();
-  const row = db
-    .prepare(`SELECT value FROM settings WHERE key='encryption_kid'`)
-    .get() as { value: string } | undefined;
+  const row = db.prepare(`SELECT value FROM settings WHERE key='encryption_kid'`).get() as
+    | { value: string }
+    | undefined;
   if (row?.value) return crypto.createHash('sha256').update(row.value).digest();
   const fresh = crypto.randomBytes(48).toString('base64');
   db.prepare(`INSERT INTO settings (key, value) VALUES ('encryption_kid', ?)`).run(fresh);
@@ -103,9 +104,7 @@ export function decrypt(stored: string): string {
 }
 
 export function getSetting(key: string): string | null {
-  const row = db.prepare(`SELECT value FROM settings WHERE key=?`).get(key) as
-    | { value: string }
-    | undefined;
+  const row = db.prepare(`SELECT value FROM settings WHERE key=?`).get(key) as { value: string } | undefined;
   return row?.value ?? null;
 }
 

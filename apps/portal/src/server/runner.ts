@@ -18,12 +18,13 @@
  *   /reports/<scan-id>/           — final report copied via --output flag
  *   /logs/<scan-id>.log           — combined stdout+stderr
  */
-import { execa, type ResultPromise } from 'execa';
+
 import fs from 'node:fs';
 import path from 'node:path';
-import { db, decrypt } from './db.js';
-import { decryptedAnthropicKey } from './settings.js';
+import { execa, type ResultPromise } from 'execa';
 import type { ScanStatus } from '../shared/types.js';
+import { db, decrypt } from './db.js';
+import { decryptedAnthropicKey, decryptedGithubToken } from './settings.js';
 
 /**
  * Tracks live worker child processes per scan-id so the portal can implement
@@ -65,9 +66,12 @@ for (const d of [REPOS_DIR, REPORTS_DIR, LOGS_DIR, WORKSPACES_DIR]) {
 
 function setStatus(scanId: string, status: ScanStatus, extra?: { error?: string; exitCode?: number }): void {
   if (status === 'completed' || status === 'failed' || status === 'cancelled') {
-    db.prepare(
-      `UPDATE scans SET status=?, finished_at=datetime('now'), error=?, exit_code=? WHERE id=?`,
-    ).run(status, extra?.error ?? null, extra?.exitCode ?? null, scanId);
+    db.prepare(`UPDATE scans SET status=?, finished_at=datetime('now'), error=?, exit_code=? WHERE id=?`).run(
+      status,
+      extra?.error ?? null,
+      extra?.exitCode ?? null,
+      scanId,
+    );
   } else {
     db.prepare(`UPDATE scans SET status=? WHERE id=?`).run(status, scanId);
   }
@@ -147,18 +151,36 @@ export async function runScan(scanId: string, targetId: string): Promise<void> {
   try {
     setStatus(scanId, 'cloning');
     let cloneUrl = target.repo_url;
+    // Resolve the Git access token in priority order:
+    //   1. Per-target encrypted token (target.repo_token_enc)
+    //   2. Global GitHub token configured under Settings
+    // The global token is the fallback for any target whose owner hasn't
+    // attached a project-specific PAT, so a single org-wide PAT can serve
+    // every private repo without duplicating it per target.
+    let tokenSource: 'per-target' | 'global' | 'none' = 'none';
+    let resolvedToken: string | null = null;
     if (target.repo_token_enc) {
       try {
-        const token = decrypt(target.repo_token_enc);
-        cloneUrl = injectGitToken(target.repo_url, token);
+        resolvedToken = decrypt(target.repo_token_enc);
+        tokenSource = 'per-target';
       } catch {
-        // Encryption key changed or row corrupted — fall back to bare URL
-        // and let git fail loudly rather than half-attempting auth.
-        log('WARNING: stored Git access token could not be decrypted, cloning without auth');
+        // Encryption key changed or row corrupted — fall back to the global
+        // token (if any) rather than silently going unauthenticated.
+        log('WARNING: per-target Git access token could not be decrypted, trying global Settings token');
       }
     }
+    if (!resolvedToken) {
+      const globalToken = decryptedGithubToken();
+      if (globalToken) {
+        resolvedToken = globalToken;
+        tokenSource = 'global';
+      }
+    }
+    if (resolvedToken) {
+      cloneUrl = injectGitToken(target.repo_url, resolvedToken);
+    }
     // Never log the token-embedded URL.
-    log(`Cloning ${target.repo_url} → ${repoDir}`);
+    log(`Cloning ${target.repo_url} → ${repoDir} (auth: ${tokenSource})`);
     await execa('git', ['clone', '--depth=1', cloneUrl, repoDir], {
       stdout: logStream,
       stderr: logStream,
@@ -349,9 +371,7 @@ function currentScanState(scanId: string): {
   exitCode: number | null;
   error: string | null;
 } | null {
-  const row = db
-    .prepare(`SELECT status, finished_at, exit_code, error FROM scans WHERE id=?`)
-    .get(scanId) as
+  const row = db.prepare(`SELECT status, finished_at, exit_code, error FROM scans WHERE id=?`).get(scanId) as
     | { status: ScanStatus; finished_at: string | null; exit_code: number | null; error: string | null }
     | undefined;
   if (!row) return null;

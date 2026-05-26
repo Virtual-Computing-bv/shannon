@@ -57,6 +57,13 @@ export interface Settings {
   anthropicKeyConfigured: boolean;
   /** Last 4 chars of the configured key, for UX confirmation. */
   anthropicKeyHint: string | null;
+  /**
+   * Global GitHub Personal Access Token — encrypted at rest. Used as fallback
+   * when a target has no per-target `repoToken` set. Never returned over the API.
+   */
+  githubTokenConfigured: boolean;
+  /** Last 4 chars of the configured GitHub token, for UX confirmation. */
+  githubTokenHint: string | null;
   /** Whether the admin password has been set (first-launch detection). */
   adminConfigured: boolean;
 }
