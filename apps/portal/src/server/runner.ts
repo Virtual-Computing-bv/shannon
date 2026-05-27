@@ -41,11 +41,15 @@ const SIGTERM_GRACE_MS = 5_000;
 
 const ACTIVE_STATUSES: ReadonlySet<ScanStatus> = new Set<ScanStatus>([
   'pending',
+  'scope-check',
   'cloning',
   'pre-recon',
   'recon',
+  'network-recon',
+  'enumeration',
   'analyzing',
   'exploiting',
+  'post-exploit',
   'reporting',
 ]);
 
@@ -102,16 +106,20 @@ function randomSuffix(): string {
   return Math.random().toString(16).slice(2, 10).padEnd(8, '0');
 }
 
+interface TargetRowMinimal {
+  id: string;
+  url: string;
+  kind: 'webapp' | 'network';
+  repo_url: string;
+  repo_token_enc: string | null;
+  hosts_json: string | null;
+  scope_label: string | null;
+  intensity: 'recon' | 'enum' | 'exploit' | null;
+  config_yaml: string | null;
+}
+
 export async function runScan(scanId: string, targetId: string): Promise<void> {
-  const target = db.prepare(`SELECT * FROM targets WHERE id=?`).get(targetId) as
-    | {
-        id: string;
-        url: string;
-        repo_url: string;
-        repo_token_enc: string | null;
-        config_yaml: string | null;
-      }
-    | undefined;
+  const target = db.prepare(`SELECT * FROM targets WHERE id=?`).get(targetId) as TargetRowMinimal | undefined;
   if (!target) {
     setStatus(scanId, 'failed', { error: 'target not found' });
     return;
@@ -120,6 +128,11 @@ export async function runScan(scanId: string, targetId: string): Promise<void> {
   const anthropicKey = decryptedAnthropicKey();
   if (!anthropicKey) {
     setStatus(scanId, 'failed', { error: 'Anthropic API key not configured — set it under Settings.' });
+    return;
+  }
+
+  if (target.kind === 'network') {
+    await runNetworkScan(scanId, target, anthropicKey);
     return;
   }
 
@@ -380,4 +393,31 @@ export function logTail(scanId: string, lines = 200): string {
   if (!fs.existsSync(p)) return '';
   const all = fs.readFileSync(p, 'utf8').split('\n');
   return all.slice(-lines).join('\n');
+}
+
+/**
+ * Network scan entrypoint. Currently a placeholder — the worker-network
+ * app + Claude tool registry land in a follow-up commit (Fase 2). Until
+ * then any attempt to scan a network target fails fast with a clear
+ * message rather than silently disappearing.
+ */
+async function runNetworkScan(scanId: string, target: TargetRowMinimal, _anthropicKey: string): Promise<void> {
+  const logPath = path.join(LOGS_DIR, `${scanId}.log`);
+  const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+  await new Promise<void>((resolve, reject) => {
+    logStream.once('open', () => resolve());
+    logStream.once('error', reject);
+  });
+  const log = (msg: string): void => {
+    logStream.write(`[${new Date().toISOString()}] ${msg}\n`);
+  };
+  try {
+    setStatus(scanId, 'scope-check');
+    const hosts = target.hosts_json ? (JSON.parse(target.hosts_json) as string[]) : [];
+    log(`Network scan requested: kind=network intensity=${target.intensity ?? 'recon'} hosts=${hosts.join(', ')}`);
+    log('worker-network app not yet built — see Fase 2.');
+    setStatus(scanId, 'failed', { error: 'network scan engine not yet deployed (Fase 2 pending)' });
+  } finally {
+    logStream.end();
+  }
 }

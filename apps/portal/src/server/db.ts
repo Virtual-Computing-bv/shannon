@@ -33,9 +33,13 @@ db.exec(`
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     url TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'webapp',
     repo_source TEXT NOT NULL DEFAULT 'github-url',
-    repo_url TEXT NOT NULL,
+    repo_url TEXT NOT NULL DEFAULT '',
     repo_token_enc TEXT,
+    hosts_json TEXT,
+    scope_label TEXT,
+    intensity TEXT,
     config_yaml TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -53,17 +57,47 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS scans_target_idx ON scans (target_id);
   CREATE INDEX IF NOT EXISTS scans_status_idx ON scans (status);
+
+  CREATE TABLE IF NOT EXISTS scope_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id TEXT REFERENCES targets(id) ON DELETE CASCADE,
+    policy TEXT NOT NULL CHECK (policy IN ('allow','deny')),
+    cidr TEXT,
+    hostname_glob TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK (
+      (cidr IS NOT NULL AND hostname_glob IS NULL) OR
+      (cidr IS NULL AND hostname_glob IS NOT NULL)
+    )
+  );
+  CREATE INDEX IF NOT EXISTS scope_rules_target_idx ON scope_rules (target_id);
 `);
 
-// Idempotent migration for DBs created before the encrypted PAT column existed.
-// node:sqlite has no IF NOT EXISTS for ADD COLUMN, so we probe pragma_table_info.
-const hasRepoToken = (
-  db
-    .prepare(`SELECT 1 AS n FROM pragma_table_info('targets') WHERE name='repo_token_enc'`)
-    .get() as { n: number } | undefined
-)?.n === 1;
-if (!hasRepoToken) {
+// Idempotent ADD COLUMN migrations. node:sqlite has no IF NOT EXISTS for
+// ADD COLUMN, so we probe pragma_table_info per column. Keep this list
+// ordered chronologically — older entries first — so the table evolves
+// the same way on every install.
+function hasColumn(table: string, column: string): boolean {
+  const row = db.prepare(`SELECT 1 AS n FROM pragma_table_info(?) WHERE name=?`).get(table, column) as
+    | { n: number }
+    | undefined;
+  return row?.n === 1;
+}
+if (!hasColumn('targets', 'repo_token_enc')) {
   db.exec(`ALTER TABLE targets ADD COLUMN repo_token_enc TEXT`);
+}
+if (!hasColumn('targets', 'kind')) {
+  db.exec(`ALTER TABLE targets ADD COLUMN kind TEXT NOT NULL DEFAULT 'webapp'`);
+}
+if (!hasColumn('targets', 'hosts_json')) {
+  db.exec(`ALTER TABLE targets ADD COLUMN hosts_json TEXT`);
+}
+if (!hasColumn('targets', 'scope_label')) {
+  db.exec(`ALTER TABLE targets ADD COLUMN scope_label TEXT`);
+}
+if (!hasColumn('targets', 'intensity')) {
+  db.exec(`ALTER TABLE targets ADD COLUMN intensity TEXT`);
 }
 
 // AES-256-GCM with a key derived from $NAHAYAT_ENCRYPTION_KEY (or a stable

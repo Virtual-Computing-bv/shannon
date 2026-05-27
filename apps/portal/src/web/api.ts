@@ -1,4 +1,13 @@
-import type { Scan, ScanWithTarget, Settings, Target } from '../shared/types';
+import type {
+  NetworkIntensity,
+  Scan,
+  ScanWithTarget,
+  ScopeRule,
+  ScopeRulePolicy,
+  Settings,
+  Target,
+  TargetKind,
+} from '../shared/types';
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(`/api${path}`, {
@@ -28,6 +37,47 @@ export interface BootstrapResponse {
   settings: Settings;
 }
 
+export interface SettingsPatch {
+  anthropicApiKey?: string | null;
+  githubToken?: string | null;
+  scopeDefaultPolicy?: ScopeRulePolicy;
+  exploitModuleEnabled?: boolean;
+}
+
+export interface ScopeRuleCreate {
+  targetId?: string | null;
+  policy: ScopeRulePolicy;
+  cidr?: string | null;
+  hostnameGlob?: string | null;
+  note?: string | null;
+}
+
+/**
+ * Webapp-target create payload. Mirrors the WebappTargetBody Zod schema on
+ * the server. `repoTokenSet` is server-managed and never sent on create.
+ */
+export interface WebappTargetCreate {
+  kind: 'webapp';
+  name: string;
+  url: string;
+  repoSource: 'github-url' | 'local-path';
+  repoUrl: string;
+  repoToken?: string | null;
+  configYaml?: string | null;
+}
+
+export interface NetworkTargetCreate {
+  kind: 'network';
+  name: string;
+  url: string;
+  hosts: string[];
+  scopeLabel: string;
+  intensity: NetworkIntensity;
+  configYaml?: string | null;
+}
+
+export type TargetCreate = WebappTargetCreate | NetworkTargetCreate;
+
 export const Api = {
   bootstrap: () => api<BootstrapResponse>('/bootstrap'),
   setup: (username: string, password: string) =>
@@ -37,16 +87,15 @@ export const Api = {
   logout: () => api<{ ok: true }>('/logout', { method: 'POST' }),
 
   settings: () => api<Settings>('/settings'),
-  saveSettings: (anthropicApiKey: string | null) =>
-    api<Settings>('/settings', { method: 'PUT', body: JSON.stringify({ anthropicApiKey }) }),
+  saveSettings: (patch: SettingsPatch) =>
+    api<Settings>('/settings', { method: 'PUT', body: JSON.stringify(patch) }),
 
   listTargets: () => api<{ data: Target[] }>('/targets').then((r) => r.data),
-  createTarget: (body: Omit<Target, 'id' | 'createdAt' | 'updatedAt'>) =>
+  createTarget: (body: TargetCreate) =>
     api<{ id: string }>('/targets', { method: 'POST', body: JSON.stringify(body) }),
-  updateTarget: (id: string, body: Partial<Omit<Target, 'id'>>) =>
+  updateTarget: (id: string, body: Record<string, unknown>) =>
     api<{ ok: true }>(`/targets/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
-  deleteTarget: (id: string) =>
-    api<{ ok: true }>(`/targets/${id}`, { method: 'DELETE' }),
+  deleteTarget: (id: string) => api<{ ok: true }>(`/targets/${id}`, { method: 'DELETE' }),
 
   listScans: () => api<{ data: ScanWithTarget[] }>('/scans').then((r) => r.data),
   startScan: (targetId: string) =>
@@ -63,6 +112,14 @@ export const Api = {
   scanLogs: (id: string) => api<string>(`/scans/${id}/logs`),
   scanReport: (id: string) => api<string>(`/scans/${id}/report`),
   scanReportDownloadUrl: (id: string) => `/api/scans/${id}/report/download`,
+
+  listScopeRules: (targetId?: string | null) => {
+    const qs = targetId === undefined ? '' : `?targetId=${encodeURIComponent(targetId === null ? 'null' : targetId)}`;
+    return api<{ data: ScopeRule[] }>(`/scope-rules${qs}`).then((r) => r.data);
+  },
+  createScopeRule: (body: ScopeRuleCreate) =>
+    api<{ data: ScopeRule }>('/scope-rules', { method: 'POST', body: JSON.stringify(body) }).then((r) => r.data),
+  deleteScopeRule: (id: number) => api<{ ok: true }>(`/scope-rules/${id}`, { method: 'DELETE' }),
 };
 
-export type { Scan, ScanWithTarget, Settings, Target };
+export type { NetworkIntensity, Scan, ScanWithTarget, ScopeRule, ScopeRulePolicy, Settings, Target, TargetKind };

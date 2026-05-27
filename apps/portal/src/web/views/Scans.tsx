@@ -3,24 +3,33 @@ import { Api, type ScanWithTarget } from '../api';
 
 const STATUS_LABEL: Record<ScanWithTarget['status'], { label: string; class: string }> = {
   pending: { label: 'In wachtrij', class: 'border-muted-foreground/30 text-muted-foreground' },
+  'scope-check': { label: 'Scope-check', class: 'border-violet/40 text-violet' },
   cloning: { label: 'Repo klonen', class: 'border-violet/40 text-violet' },
   'pre-recon': { label: 'Code lezen', class: 'border-violet/40 text-violet' },
   recon: { label: 'Verkennen', class: 'border-violet/40 text-violet' },
+  'network-recon': { label: 'Netwerk-verkenning', class: 'border-violet/40 text-violet' },
+  enumeration: { label: 'Enumereren', class: 'border-violet/40 text-violet' },
   analyzing: { label: 'Analyseren', class: 'border-primary/40 text-primary' },
   exploiting: { label: 'Exploits draaien', class: 'border-primary/40 text-primary' },
+  'post-exploit': { label: 'Post-exploit', class: 'border-primary/40 text-primary' },
   reporting: { label: 'Rapport schrijven', class: 'border-primary/40 text-primary' },
   completed: { label: 'Voltooid', class: 'border-emerald-500/40 text-emerald-400' },
   failed: { label: 'Mislukt', class: 'border-destructive/40 text-destructive' },
   cancelled: { label: 'Geannuleerd', class: 'border-muted-foreground/30 text-muted-foreground' },
+  'scope-violation': { label: 'Scope-overtreding', class: 'border-destructive/40 text-destructive' },
 };
 
 const ACTIVE_SCAN_STATUSES: ReadonlySet<ScanWithTarget['status']> = new Set([
   'pending',
+  'scope-check',
   'cloning',
   'pre-recon',
   'recon',
+  'network-recon',
+  'enumeration',
   'analyzing',
   'exploiting',
+  'post-exploit',
   'reporting',
 ]);
 
