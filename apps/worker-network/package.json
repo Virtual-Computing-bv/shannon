@@ -1,0 +1,22 @@
+{
+  "name": "@nahayat/worker-network",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Nahayat AI-driven network pentest engine. Claude orchestrates nmap/nuclei/metasploit/etc against scope-checked targets.",
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "start": "node dist/run.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.1",
+    "execa": "^9.5.2",
+    "js-yaml": "^4.1.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9"
+  }
+}
