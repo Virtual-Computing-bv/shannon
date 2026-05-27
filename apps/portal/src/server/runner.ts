@@ -22,7 +22,13 @@ import { execa, type ResultPromise } from 'execa';
 import fs from 'node:fs';
 import path from 'node:path';
 import { db, decrypt } from './db.js';
-import { decryptedAnthropicKey } from './settings.js';
+import { checkScope } from './scope.js';
+import {
+  decryptedAnthropicKey,
+  getExploitModuleEnabled,
+  getScopeDefaultPolicy,
+  listScopeRules,
+} from './settings.js';
 import type { ScanStatus } from '../shared/types.js';
 
 /**
@@ -395,13 +401,17 @@ export function logTail(scanId: string, lines = 200): string {
   return all.slice(-lines).join('\n');
 }
 
+const WORKER_NETWORK_ENTRY = path.join(SHANNON_DIR, 'apps/worker-network/dist/run.js');
+
 /**
- * Network scan entrypoint. Currently a placeholder — the worker-network
- * app + Claude tool registry land in a follow-up commit (Fase 2). Until
- * then any attempt to scan a network target fails fast with a clear
- * message rather than silently disappearing.
+ * Network scan entrypoint. Resolves every requested host, validates it
+ * against the scope rules (per-target + global + default policy), and
+ * — only if every host clears — spawns the worker-network engine with
+ * the effective intensity. The effective intensity is downgraded from
+ * 'exploit' to 'enum' when the global exploitModuleEnabled switch is
+ * off, so the master kill-switch always wins.
  */
-async function runNetworkScan(scanId: string, target: TargetRowMinimal, _anthropicKey: string): Promise<void> {
+async function runNetworkScan(scanId: string, target: TargetRowMinimal, anthropicKey: string): Promise<void> {
   const logPath = path.join(LOGS_DIR, `${scanId}.log`);
   const logStream = fs.createWriteStream(logPath, { flags: 'a' });
   await new Promise<void>((resolve, reject) => {
@@ -411,13 +421,124 @@ async function runNetworkScan(scanId: string, target: TargetRowMinimal, _anthrop
   const log = (msg: string): void => {
     logStream.write(`[${new Date().toISOString()}] ${msg}\n`);
   };
+
+  const reportDir = path.join(REPORTS_DIR, scanId);
+  const workspaceDir = path.join(WORKSPACES_DIR, scanId);
+  fs.mkdirSync(reportDir, { recursive: true });
+  fs.mkdirSync(workspaceDir, { recursive: true });
+
   try {
     setStatus(scanId, 'scope-check');
     const hosts = target.hosts_json ? (JSON.parse(target.hosts_json) as string[]) : [];
-    log(`Network scan requested: kind=network intensity=${target.intensity ?? 'recon'} hosts=${hosts.join(', ')}`);
-    log('worker-network app not yet built — see Fase 2.');
-    setStatus(scanId, 'failed', { error: 'network scan engine not yet deployed (Fase 2 pending)' });
+    const requestedIntensity = target.intensity ?? 'recon';
+    const exploitEnabled = getExploitModuleEnabled();
+    const effectiveIntensity = requestedIntensity === 'exploit' && !exploitEnabled ? 'enum' : requestedIntensity;
+    if (requestedIntensity === 'exploit' && !exploitEnabled) {
+      log(`Exploit-module disabled in Settings — downgrading intensity from 'exploit' to 'enum'.`);
+    }
+
+    log(`Network scan: target=${target.id} hosts=${hosts.join(', ')} intensity=${effectiveIntensity}`);
+
+    const perTargetRules = listScopeRules(target.id);
+    const globalRules = listScopeRules(null);
+    const defaultPolicy = getScopeDefaultPolicy();
+    const scopeResult = await checkScope(hosts, perTargetRules, globalRules, defaultPolicy);
+
+    // Persist the full decision set as a JSONL audit log inside the
+    // scan workspace so the report can cite it and so post-hoc audits
+    // can prove what the scope check saw.
+    const scopeLogPath = path.join(workspaceDir, 'scope-decisions.json');
+    fs.writeFileSync(scopeLogPath, JSON.stringify(scopeResult, (_k, v) => (typeof v === 'bigint' ? v.toString() : v), 2));
+    for (const d of scopeResult.decisions) {
+      log(`scope[${d.decision}] ${d.host.raw} — ${d.reason}`);
+    }
+
+    if (!scopeResult.allowed) {
+      const denied = scopeResult.decisions.filter((d) => d.decision === 'deny').map((d) => d.host.raw);
+      setStatus(scanId, 'failed', {
+        error: `scope check failed — denied hosts: ${denied.join(', ')}. See ${scopeLogPath}.`,
+      });
+      log(`Scope check FAILED. Refusing to dispatch worker.`);
+      // node:sqlite's UPDATE is synchronous, status is already 'failed'.
+      // We additionally mark the special 'scope-violation' status for UX clarity.
+      db.prepare(`UPDATE scans SET status='scope-violation' WHERE id=?`).run(scanId);
+      return;
+    }
+
+    log(`Scope check passed (${scopeResult.decisions.length} hosts allowed). Spawning worker-network…`);
+    const allowedHostList = scopeResult.decisions.map((d) => d.host.raw);
+
+    setStatus(scanId, 'network-recon');
+    const args = [
+      WORKER_NETWORK_ENTRY,
+      '--workspace',
+      workspaceDir,
+      '--output',
+      reportDir,
+      '--intensity',
+      effectiveIntensity,
+      '--scope-label',
+      target.scope_label ?? '',
+      ...allowedHostList.flatMap((h) => ['--host', h]),
+    ];
+    if (target.config_yaml) {
+      const cfgPath = path.join(workspaceDir, 'config.yaml');
+      fs.writeFileSync(cfgPath, target.config_yaml);
+      args.push('--config', cfgPath);
+    }
+
+    const child = execa('node', args, {
+      cwd: SHANNON_DIR,
+      env: {
+        ...process.env,
+        ANTHROPIC_API_KEY: anthropicKey,
+        NAHAYAT_SCAN_ID: scanId,
+      },
+    });
+    runningScans.set(scanId, child);
+
+    child.stdout?.on('data', (buf: Buffer) => {
+      const txt = buf.toString();
+      logStream.write(txt);
+      if (txt.includes('phase:enum')) setStatus(scanId, 'enumeration');
+      else if (txt.includes('phase:exploit')) setStatus(scanId, 'exploiting');
+      else if (txt.includes('phase:post-exploit')) setStatus(scanId, 'post-exploit');
+      else if (txt.includes('phase:report')) setStatus(scanId, 'reporting');
+    });
+    child.stderr?.on('data', (buf: Buffer) => logStream.write(buf));
+
+    let exitCode = 0;
+    let errMsg: string | undefined;
+    let killedBySignal: string | undefined;
+    try {
+      await child;
+    } catch (e) {
+      const result = e as { exitCode?: number; shortMessage?: string; signal?: string };
+      exitCode = result.exitCode ?? -1;
+      errMsg = result.shortMessage ?? (e instanceof Error ? e.message : String(e));
+      killedBySignal = result.signal;
+    } finally {
+      runningScans.delete(scanId);
+    }
+
+    const wasCancelled = cancellingScans.delete(scanId);
+    if (wasCancelled || killedBySignal === 'SIGTERM' || killedBySignal === 'SIGKILL') {
+      setStatus(scanId, 'cancelled', { exitCode, error: 'cancelled by user' });
+      log(`Network scan cancelled.`);
+    } else if (exitCode === 0) {
+      setStatus(scanId, 'completed', { exitCode: 0 });
+      log(`Network scan completed.`);
+    } else {
+      setStatus(scanId, 'failed', { exitCode, error: errMsg ?? 'unknown error' });
+      log(`Network scan failed (exit ${exitCode}): ${errMsg ?? 'unknown'}`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    setStatus(scanId, 'failed', { error: msg });
+    log(`Network scan crashed: ${msg}`);
   } finally {
+    runningScans.delete(scanId);
+    cancellingScans.delete(scanId);
     logStream.end();
   }
 }
