@@ -2,25 +2,34 @@ import { useCallback, useEffect, useState } from 'react';
 import { Api, type ScanWithTarget } from '../api';
 
 const STATUS_LABEL: Record<ScanWithTarget['status'], { label: string; class: string }> = {
-  pending: { label: 'In wachtrij', class: 'border-muted-foreground/30 text-muted-foreground' },
-  cloning: { label: 'Repo klonen', class: 'border-violet/40 text-violet' },
-  'pre-recon': { label: 'Code lezen', class: 'border-violet/40 text-violet' },
-  recon: { label: 'Verkennen', class: 'border-violet/40 text-violet' },
-  analyzing: { label: 'Analyseren', class: 'border-primary/40 text-primary' },
-  exploiting: { label: 'Exploits draaien', class: 'border-primary/40 text-primary' },
-  reporting: { label: 'Rapport schrijven', class: 'border-primary/40 text-primary' },
-  completed: { label: 'Voltooid', class: 'border-emerald-500/40 text-emerald-400' },
-  failed: { label: 'Mislukt', class: 'border-destructive/40 text-destructive' },
-  cancelled: { label: 'Geannuleerd', class: 'border-muted-foreground/30 text-muted-foreground' },
+  pending: { label: 'In wachtrij', class: '' },
+  'scope-check': { label: 'Scope-check', class: 'badge-cyan' },
+  cloning: { label: 'Repo klonen', class: 'badge-blue' },
+  'pre-recon': { label: 'Code lezen', class: 'badge-blue' },
+  recon: { label: 'Verkennen', class: 'badge-blue' },
+  'network-recon': { label: 'Netwerk verkennen', class: 'badge-cyan' },
+  enumeration: { label: 'Enumeratie', class: 'badge-cyan' },
+  analyzing: { label: 'Analyseren', class: 'badge-blue' },
+  exploiting: { label: 'Exploits draaien', class: 'badge-warning' },
+  'post-exploit': { label: 'Post-exploit', class: 'badge-warning' },
+  reporting: { label: 'Rapport schrijven', class: 'badge-blue' },
+  completed: { label: 'Voltooid', class: 'badge-success' },
+  failed: { label: 'Mislukt', class: 'badge-danger' },
+  cancelled: { label: 'Geannuleerd', class: '' },
+  'scope-violation': { label: 'Buiten scope', class: 'badge-danger' },
 };
 
 const ACTIVE_SCAN_STATUSES: ReadonlySet<ScanWithTarget['status']> = new Set([
   'pending',
+  'scope-check',
   'cloning',
   'pre-recon',
   'recon',
+  'network-recon',
+  'enumeration',
   'analyzing',
   'exploiting',
+  'post-exploit',
   'reporting',
 ]);
 
@@ -71,15 +80,15 @@ export function Scans() {
     <div className="space-y-4">
       <div>
         <h1 className="text-2xl font-bold">Scans</h1>
-        <p className="text-sm text-muted-foreground">
-          Live status + logs + rapporten van alle uitgevoerde pentests.
+        <p className="text-sm text-ink-500">
+          Live status, logs en rapporten van alle uitgevoerde pentests.
         </p>
       </div>
 
       {loading ? (
-        <div className="text-muted-foreground">Laden…</div>
+        <div className="text-ink-500">Laden…</div>
       ) : scans.length === 0 ? (
-        <div className="glass p-8 text-center text-muted-foreground">
+        <div className="card p-10 text-center text-ink-500">
           Nog geen scans. Start een scan vanuit het Targets-tabblad.
         </div>
       ) : (
@@ -87,40 +96,37 @@ export function Scans() {
           {scans.map((s) => {
             const meta = STATUS_LABEL[s.status];
             return (
-              <div key={s.id} className="glass p-4">
-                <div className="flex items-start justify-between gap-3 flex-wrap">
+              <div key={s.id} className="card card-hover p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
+                    <div className="flex flex-wrap items-center gap-2">
                       <h3 className="font-semibold">{s.target.name}</h3>
                       <span className={`badge ${meta.class}`}>{meta.label}</span>
+                      <span className={`badge ${s.target.kind === 'network' ? 'badge-cyan' : 'badge-blue'}`}>
+                        {s.target.kind === 'network' ? 'On-prem' : 'Web-app'}
+                      </span>
                     </div>
-                    <div className="text-xs text-muted-foreground">
+                    <div className="mt-1 text-xs text-ink-500">
                       {s.target.url} · gestart {new Date(s.startedAt).toLocaleString('nl-NL')}
-                      {s.finishedAt &&
-                        ` · klaar ${new Date(s.finishedAt).toLocaleString('nl-NL')}`}
+                      {s.finishedAt && ` · klaar ${new Date(s.finishedAt).toLocaleString('nl-NL')}`}
                     </div>
-                    {s.error && (
-                      <div className="mt-1 text-xs text-destructive font-mono">{s.error}</div>
-                    )}
+                    {s.error && <div className="mt-1 font-mono text-xs text-danger-600">{s.error}</div>}
                   </div>
-                  <div className="flex gap-2">
-                    <button onClick={() => setViewing(s)} className="btn-ghost">
+                  <div className="flex flex-wrap gap-2">
+                    <button onClick={() => setViewing(s)} className="btn-ghost btn-sm">
                       Bekijken
                     </button>
                     {ACTIVE_SCAN_STATUSES.has(s.status) && (
                       <button
                         onClick={() => handleStop(s)}
                         disabled={stoppingId === s.id}
-                        className="btn-ghost text-destructive disabled:opacity-50"
+                        className="btn-danger"
                       >
                         {stoppingId === s.id ? 'Bezig met stoppen…' : 'Stop scan'}
                       </button>
                     )}
                     {s.status === 'completed' && (
-                      <a
-                        href={Api.scanReportDownloadUrl(s.id)}
-                        className="btn-primary"
-                      >
+                      <a href={Api.scanReportDownloadUrl(s.id)} className="btn-primary btn-sm">
                         Download rapport
                       </a>
                     )}
@@ -169,12 +175,12 @@ function ScanDetail({ scan, onClose }: { scan: ScanWithTarget; onClose: () => vo
   }, [scan.id, scan.status]);
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-onyx/70 p-6 backdrop-blur-md">
-      <div className="glass flex h-[85vh] w-full max-w-5xl flex-col p-0 overflow-hidden">
-        <header className="flex items-center justify-between border-b border-border/40 p-4">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-ink-900/40 p-6 backdrop-blur-sm">
+      <div className="card flex h-[85vh] w-full max-w-5xl flex-col overflow-hidden p-0">
+        <header className="flex items-center justify-between border-b border-line p-4">
           <div className="min-w-0">
             <h2 className="font-semibold">{scan.target.name}</h2>
-            <p className="text-xs text-muted-foreground">{scan.target.url}</p>
+            <p className="text-xs text-ink-500">{scan.target.url}</p>
           </div>
           <div className="flex gap-1">
             <TabButton current={tab} value="log" onClick={setTab}>
@@ -183,22 +189,22 @@ function ScanDetail({ scan, onClose }: { scan: ScanWithTarget; onClose: () => vo
             <TabButton current={tab} value="report" onClick={setTab}>
               Rapport
             </TabButton>
-            <button onClick={onClose} className="btn-ghost ml-2">
+            <button onClick={onClose} className="btn-ghost btn-sm ml-2">
               Sluiten
             </button>
           </div>
         </header>
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto bg-bg">
           {tab === 'log' ? (
-            <pre className="whitespace-pre-wrap p-4 font-mono text-xs text-muted-foreground">
+            <pre className="whitespace-pre-wrap p-4 font-mono text-xs text-ink-600">
               {log || '(nog geen log-output)'}
             </pre>
           ) : report ? (
-            <div className="p-6 text-sm leading-relaxed">
+            <div className="p-6 text-sm leading-relaxed text-ink-700">
               <MarkdownPreview md={report} />
             </div>
           ) : (
-            <div className="grid place-items-center p-12 text-muted-foreground">
+            <div className="grid place-items-center p-12 text-ink-500">
               {scan.status === 'completed'
                 ? 'Rapport wordt geladen…'
                 : 'Rapport komt beschikbaar zodra de scan klaar is.'}
@@ -226,8 +232,8 @@ function TabButton<T extends string>({
     <button
       onClick={() => onClick(value)}
       className={
-        'rounded-md px-3 py-1.5 text-sm font-medium transition ' +
-        (active ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:bg-secondary')
+        'rounded-pill px-3 py-1.5 text-sm font-semibold transition ' +
+        (active ? 'bg-ink-900 text-white' : 'text-ink-600 hover:bg-panel hover:text-ink-900')
       }
     >
       {children}
@@ -243,21 +249,17 @@ function MarkdownPreview({ md }: { md: string }) {
   // Split into code blocks vs prose so we can render fenced ``` blocks raw.
   const parts = md.split(/(```[\s\S]*?```)/g);
   return (
-    <article className="prose prose-invert max-w-none">
+    <article className="max-w-none">
       {parts.map((part, i) =>
         part.startsWith('```') ? (
           <pre
             key={i}
-            className="overflow-x-auto rounded-md border border-border bg-onyx-light/60 p-3 text-xs"
+            className="overflow-x-auto rounded-md border border-line bg-panel p-3 text-xs text-ink-700"
           >
             <code>{part.replace(/^```[\w-]*\n?/, '').replace(/```$/, '')}</code>
           </pre>
         ) : (
-          <div
-            key={i}
-            dangerouslySetInnerHTML={{ __html: renderProse(part) }}
-            className="space-y-2"
-          />
+          <div key={i} dangerouslySetInnerHTML={{ __html: renderProse(part) }} className="space-y-2" />
         ),
       )}
     </article>
@@ -266,15 +268,15 @@ function MarkdownPreview({ md }: { md: string }) {
 
 function renderProse(md: string): string {
   // Headings → h tags.
-  let out = md
-    .replace(/^### (.*)$/gm, '<h3 class="mt-4 text-base font-semibold">$1</h3>')
-    .replace(/^## (.*)$/gm, '<h2 class="mt-5 text-lg font-bold">$1</h2>')
-    .replace(/^# (.*)$/gm, '<h1 class="mt-2 text-2xl font-bold">$1</h1>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/`([^`]+)`/g, '<code class="rounded bg-secondary px-1.5 py-0.5 text-xs">$1</code>')
+  const out = md
+    .replace(/^### (.*)$/gm, '<h3 class="mt-4 text-base font-semibold text-ink-900">$1</h3>')
+    .replace(/^## (.*)$/gm, '<h2 class="mt-5 text-lg font-bold text-ink-900">$1</h2>')
+    .replace(/^# (.*)$/gm, '<h1 class="mt-2 text-2xl font-bold text-ink-900">$1</h1>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong class="text-ink-900">$1</strong>')
+    .replace(/`([^`]+)`/g, '<code class="rounded bg-panel px-1.5 py-0.5 text-xs text-ink-700">$1</code>')
     .replace(
       /\[([^\]]+)\]\(([^)]+)\)/g,
-      '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-primary underline">$1</a>',
+      '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-blue-600 underline">$1</a>',
     )
     .replace(/^- (.*)$/gm, '<li class="ml-5 list-disc">$1</li>')
     .replace(/\n{2,}/g, '<br><br>');

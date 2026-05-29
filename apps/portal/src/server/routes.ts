@@ -4,15 +4,22 @@ import path from 'node:path';
 import bcrypt from 'bcryptjs';
 import express, { type Router as ExpressRouter } from 'express';
 import { z } from 'zod';
-import type { Scan, ScanWithTarget, Target } from '../shared/types.js';
+import type { NetworkIntensity, Scan, ScanWithTarget, ScopeRulePolicy, Target, TargetKind } from '../shared/types.js';
+import { MODEL_OPTIONS } from '../shared/types.js';
 import { db, encrypt } from './db.js';
 import { logTail, reportPath, runScan, stopScan } from './runner.js';
 import {
+  createScopeRule,
   decryptedGithubToken,
+  deleteScopeRule,
+  listScopeRules,
   markAdminInitialized,
   publicSettings,
   setAnthropicKey,
+  setExploitModuleEnabled,
   setGithubToken,
+  setModel,
+  setScopeDefaultPolicy,
 } from './settings.js';
 
 declare module 'express-session' {
@@ -100,6 +107,9 @@ router.get('/settings', requireAuth, (_req, res) => {
 const SettingsBody = z.object({
   anthropicApiKey: z.string().nullable().optional(),
   githubToken: z.string().nullable().optional(),
+  scopeDefaultPolicy: z.enum(['allow', 'deny']).optional(),
+  exploitModuleEnabled: z.boolean().optional(),
+  model: z.enum(MODEL_OPTIONS.map((m) => m.id) as [string, ...string[]]).optional(),
 });
 router.put('/settings', requireAuth, (req, res) => {
   const parsed = SettingsBody.safeParse(req.body);
@@ -112,6 +122,15 @@ router.put('/settings', requireAuth, (req, res) => {
   }
   if (parsed.data.githubToken !== undefined) {
     setGithubToken(parsed.data.githubToken);
+  }
+  if (parsed.data.scopeDefaultPolicy !== undefined) {
+    setScopeDefaultPolicy(parsed.data.scopeDefaultPolicy);
+  }
+  if (parsed.data.exploitModuleEnabled !== undefined) {
+    setExploitModuleEnabled(parsed.data.exploitModuleEnabled);
+  }
+  if (parsed.data.model !== undefined) {
+    setModel(parsed.data.model);
   }
   res.json(publicSettings());
 });
@@ -151,7 +170,8 @@ router.post('/settings/github/test', requireAuth, async (_req, res) => {
 });
 
 // ── Targets ──
-const TargetBody = z.object({
+const WebappTargetBody = z.object({
+  kind: z.literal('webapp'),
   name: z.string().min(1).max(64),
   url: z.string().url(),
   repoSource: z.enum(['github-url', 'local-path']).default('github-url'),
@@ -164,30 +184,82 @@ const TargetBody = z.object({
   configYaml: z.string().nullable().optional(),
 });
 
-router.get('/targets', requireAuth, (_req, res) => {
-  const rows = db.prepare(`SELECT * FROM targets ORDER BY created_at DESC`).all() as Array<{
-    id: string;
-    name: string;
-    url: string;
-    repo_source: 'github-url' | 'local-path';
-    repo_url: string;
-    repo_token_enc: string | null;
-    config_yaml: string | null;
-    created_at: string;
-    updated_at: string;
-  }>;
-  const targets: Target[] = rows.map((r) => ({
+const NetworkTargetBody = z.object({
+  kind: z.literal('network'),
+  name: z.string().min(1).max(64),
+  /** Primary host string used for labelling. IP, CIDR, or hostname. */
+  url: z.string().min(1),
+  hosts: z.array(z.string().min(1)).min(1),
+  scopeLabel: z.string().min(1).max(120),
+  intensity: z.enum(['recon', 'enum', 'exploit']),
+  configYaml: z.string().nullable().optional(),
+});
+
+const TargetBody = z.discriminatedUnion('kind', [WebappTargetBody, NetworkTargetBody]);
+
+const TargetPatchBody = z.object({
+  name: z.string().min(1).max(64).optional(),
+  url: z.string().min(1).optional(),
+  repoSource: z.enum(['github-url', 'local-path']).optional(),
+  repoUrl: z.string().min(1).optional(),
+  repoToken: z.string().nullable().optional(),
+  configYaml: z.string().nullable().optional(),
+  hosts: z.array(z.string().min(1)).min(1).optional(),
+  scopeLabel: z.string().min(1).max(120).optional(),
+  intensity: z.enum(['recon', 'enum', 'exploit']).optional(),
+});
+
+interface TargetRow {
+  id: string;
+  name: string;
+  url: string;
+  kind: TargetKind;
+  repo_source: 'github-url' | 'local-path';
+  repo_url: string;
+  repo_token_enc: string | null;
+  hosts_json: string | null;
+  scope_label: string | null;
+  intensity: NetworkIntensity | null;
+  config_yaml: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function rowToTarget(r: TargetRow): Target {
+  const base = {
     id: r.id,
     name: r.name,
     url: r.url,
-    repoSource: r.repo_source,
-    repoUrl: r.repo_url,
-    repoTokenSet: !!r.repo_token_enc,
+    kind: r.kind,
     configYaml: r.config_yaml,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
-  }));
-  res.json({ data: targets });
+  };
+  if (r.kind === 'network') {
+    return {
+      ...base,
+      webapp: null,
+      network: {
+        hosts: r.hosts_json ? (JSON.parse(r.hosts_json) as string[]) : [],
+        scopeLabel: r.scope_label ?? '',
+        intensity: r.intensity ?? 'recon',
+      },
+    };
+  }
+  return {
+    ...base,
+    webapp: {
+      repoSource: r.repo_source,
+      repoUrl: r.repo_url,
+      repoTokenSet: !!r.repo_token_enc,
+    },
+    network: null,
+  };
+}
+
+router.get('/targets', requireAuth, (_req, res) => {
+  const rows = db.prepare(`SELECT * FROM targets ORDER BY created_at DESC`).all() as unknown as TargetRow[];
+  res.json({ data: rows.map(rowToTarget) });
 });
 
 router.post('/targets', requireAuth, (req, res) => {
@@ -197,25 +269,40 @@ router.post('/targets', requireAuth, (req, res) => {
     return;
   }
   const id = crypto.randomUUID();
-  const tokenPlain = parsed.data.repoToken?.trim();
-  const tokenEnc = tokenPlain ? encrypt(tokenPlain) : null;
-  db.prepare(
-    `INSERT INTO targets (id, name, url, repo_source, repo_url, repo_token_enc, config_yaml)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    id,
-    parsed.data.name,
-    parsed.data.url,
-    parsed.data.repoSource,
-    parsed.data.repoUrl,
-    tokenEnc,
-    parsed.data.configYaml ?? null,
-  );
+  if (parsed.data.kind === 'network') {
+    db.prepare(
+      `INSERT INTO targets (id, name, url, kind, repo_url, hosts_json, scope_label, intensity, config_yaml)
+       VALUES (?, ?, ?, 'network', '', ?, ?, ?, ?)`,
+    ).run(
+      id,
+      parsed.data.name,
+      parsed.data.url,
+      JSON.stringify(parsed.data.hosts),
+      parsed.data.scopeLabel,
+      parsed.data.intensity,
+      parsed.data.configYaml ?? null,
+    );
+  } else {
+    const tokenPlain = parsed.data.repoToken?.trim();
+    const tokenEnc = tokenPlain ? encrypt(tokenPlain) : null;
+    db.prepare(
+      `INSERT INTO targets (id, name, url, kind, repo_source, repo_url, repo_token_enc, config_yaml)
+       VALUES (?, ?, ?, 'webapp', ?, ?, ?, ?)`,
+    ).run(
+      id,
+      parsed.data.name,
+      parsed.data.url,
+      parsed.data.repoSource,
+      parsed.data.repoUrl,
+      tokenEnc,
+      parsed.data.configYaml ?? null,
+    );
+  }
   res.json({ id });
 });
 
 router.put('/targets/:id', requireAuth, (req, res) => {
-  const parsed = TargetBody.partial().safeParse(req.body);
+  const parsed = TargetPatchBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'invalid' });
     return;
@@ -256,6 +343,18 @@ router.put('/targets/:id', requireAuth, (req, res) => {
   if (fields.configYaml !== undefined) {
     sets.push('config_yaml=?');
     vals.push(fields.configYaml);
+  }
+  if (fields.hosts !== undefined) {
+    sets.push('hosts_json=?');
+    vals.push(JSON.stringify(fields.hosts));
+  }
+  if (fields.scopeLabel !== undefined) {
+    sets.push('scope_label=?');
+    vals.push(fields.scopeLabel);
+  }
+  if (fields.intensity !== undefined) {
+    sets.push('intensity=?');
+    vals.push(fields.intensity);
   }
   if (sets.length === 0) {
     res.json({ ok: true });
@@ -303,7 +402,7 @@ router.post('/scans', requireAuth, (req, res) => {
 router.get('/scans', requireAuth, (_req, res) => {
   const rows = db
     .prepare(
-      `SELECT s.*, t.name AS t_name, t.url AS t_url FROM scans s
+      `SELECT s.*, t.name AS t_name, t.url AS t_url, t.kind AS t_kind FROM scans s
        JOIN targets t ON t.id = s.target_id
        ORDER BY s.started_at DESC
        LIMIT 200`,
@@ -319,6 +418,7 @@ router.get('/scans', requireAuth, (_req, res) => {
     error: string | null;
     t_name: string;
     t_url: string;
+    t_kind: TargetKind;
   }>;
   const scans: ScanWithTarget[] = rows.map((r) => ({
     id: r.id,
@@ -329,7 +429,7 @@ router.get('/scans', requireAuth, (_req, res) => {
     finishedAt: r.finished_at,
     exitCode: r.exit_code,
     error: r.error,
-    target: { id: r.target_id, name: r.t_name, url: r.t_url },
+    target: { id: r.target_id, name: r.t_name, url: r.t_url, kind: r.t_kind },
   }));
   res.json({ data: scans });
 });
@@ -378,4 +478,65 @@ router.get('/scans/:id/report/download', requireAuth, (req, res) => {
     return;
   }
   res.download(p, `nahayat-pentest-${req.params.id}-${path.basename(p)}`);
+});
+
+// ── Scope rules ──
+// Used by the Settings UI scope editor. A rule with target_id=null is global
+// (default-deny applies to every network target); a rule scoped to a target
+// is checked first and overrides the global default for that target. cidr
+// and hostname_glob are mutually exclusive — exactly one is set per rule.
+const ScopeRuleBody = z
+  .object({
+    targetId: z.string().nullable().optional(),
+    policy: z.enum(['allow', 'deny']),
+    cidr: z.string().min(1).nullable().optional(),
+    hostnameGlob: z.string().min(1).nullable().optional(),
+    note: z.string().nullable().optional(),
+  })
+  .refine((b) => Boolean(b.cidr) !== Boolean(b.hostnameGlob), {
+    message: 'exactly one of cidr or hostnameGlob must be set',
+  });
+
+router.get('/scope-rules', requireAuth, (req, res) => {
+  const targetIdParam = typeof req.query.targetId === 'string' ? req.query.targetId : undefined;
+  // 'null' literal in query string → global rules only. Absent → all rules.
+  if (targetIdParam === 'null') {
+    res.json({ data: listScopeRules(null) });
+    return;
+  }
+  if (targetIdParam !== undefined) {
+    res.json({ data: listScopeRules(targetIdParam) });
+    return;
+  }
+  res.json({ data: listScopeRules() });
+});
+
+router.post('/scope-rules', requireAuth, (req, res) => {
+  const parsed = ScopeRuleBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid', issues: parsed.error.issues });
+    return;
+  }
+  const rule = createScopeRule({
+    targetId: parsed.data.targetId ?? null,
+    policy: parsed.data.policy as ScopeRulePolicy,
+    cidr: parsed.data.cidr ?? null,
+    hostnameGlob: parsed.data.hostnameGlob ?? null,
+    note: parsed.data.note ?? null,
+  });
+  res.json({ data: rule });
+});
+
+router.delete('/scope-rules/:id', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: 'invalid id' });
+    return;
+  }
+  const ok = deleteScopeRule(id);
+  if (!ok) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+  res.json({ ok: true });
 });

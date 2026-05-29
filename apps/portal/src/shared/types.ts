@@ -3,10 +3,50 @@
  * dependency-free so we can import them from both build environments.
  */
 
-export interface Target {
+export type TargetKind = 'webapp' | 'network';
+
+/**
+ * Selectable Claude models for the deep-reasoning (LARGE) tier that drives the
+ * vulnerability analysis and exploitation phases. Persisted in Settings and
+ * injected as ANTHROPIC_LARGE_MODEL when the worker spawns. The small/medium
+ * tiers keep their pipeline defaults.
+ */
+export interface ModelOption {
   id: string;
-  name: string;
-  url: string;
+  label: string;
+  description: string;
+}
+
+export const MODEL_OPTIONS: readonly ModelOption[] = [
+  {
+    id: 'claude-opus-4-7',
+    label: 'Claude Opus 4.7',
+    description: 'Diepste redenering — meest grondige analyse. Standaard.',
+  },
+  {
+    id: 'claude-sonnet-4-6',
+    label: 'Claude Sonnet 4.6',
+    description: 'Sneller en goedkoper, sterke balans tussen kosten en diepgang.',
+  },
+  {
+    id: 'claude-haiku-4-5-20251001',
+    label: 'Claude Haiku 4.5',
+    description: 'Snelst en goedkoopst — voor lichte scans en snelle checks.',
+  },
+] as const;
+
+export const DEFAULT_MODEL = 'claude-opus-4-7';
+
+/**
+ * Pentest aggressiveness for network targets.
+ * - recon: port + service discovery only (nmap, banner grab). No active probes.
+ * - enum: + nuclei templates, gobuster, whatweb. Read-only fingerprinting.
+ * - exploit: + searchsploit lookup + metasploit modules + hydra. Requires
+ *   the global `exploitModuleEnabled` setting AND a per-target opt-in.
+ */
+export type NetworkIntensity = 'recon' | 'enum' | 'exploit';
+
+export interface WebappTargetFields {
   /**
    * One of: github-url | local-path. For now we only support github-url and
    * shallow-clone the repo into a per-scan workspace at run time.
@@ -19,23 +59,51 @@ export interface Target {
    * is set (so the form can show a "leave blank to keep" placeholder).
    */
   repoTokenSet: boolean;
+}
+
+export interface NetworkTargetFields {
+  /**
+   * Host list — IPs, CIDR ranges, or hostnames. Resolved + scope-checked
+   * before the workflow can dispatch any active probe.
+   */
+  hosts: string[];
+  /** Free-text label describing the engagement scope, surfaced in reports. */
+  scopeLabel: string;
+  intensity: NetworkIntensity;
+}
+
+export interface Target {
+  id: string;
+  name: string;
+  /** Running app URL for webapp targets, primary host for network targets. */
+  url: string;
+  kind: TargetKind;
   /** Optional YAML config (auth + rules). Stored verbatim. */
   configYaml: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Populated only when kind === 'webapp'. */
+  webapp: WebappTargetFields | null;
+  /** Populated only when kind === 'network'. */
+  network: NetworkTargetFields | null;
 }
 
 export type ScanStatus =
   | 'pending'
+  | 'scope-check'
   | 'cloning'
   | 'pre-recon'
   | 'recon'
+  | 'network-recon'
+  | 'enumeration'
   | 'analyzing'
   | 'exploiting'
+  | 'post-exploit'
   | 'reporting'
   | 'completed'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  | 'scope-violation';
 
 export interface Scan {
   id: string;
@@ -49,7 +117,21 @@ export interface Scan {
 }
 
 export interface ScanWithTarget extends Scan {
-  target: Pick<Target, 'id' | 'name' | 'url'>;
+  target: Pick<Target, 'id' | 'name' | 'url' | 'kind'>;
+}
+
+export type ScopeRulePolicy = 'allow' | 'deny';
+
+export interface ScopeRule {
+  id: number;
+  /** When null, the rule is global (applies to every network target). */
+  targetId: string | null;
+  policy: ScopeRulePolicy;
+  /** Either cidr OR hostnameGlob is set, never both. */
+  cidr: string | null;
+  hostnameGlob: string | null;
+  note: string | null;
+  createdAt: string;
 }
 
 export interface Settings {
@@ -66,4 +148,20 @@ export interface Settings {
   githubTokenHint: string | null;
   /** Whether the admin password has been set (first-launch detection). */
   adminConfigured: boolean;
+  /**
+   * Default scope policy applied when no rule matches a host. 'deny' is the
+   * safe default — every network target must be explicitly allowlisted.
+   */
+  scopeDefaultPolicy: ScopeRulePolicy;
+  /**
+   * Master switch for exploit-class tooling (metasploit, hydra, searchsploit
+   * exploit suggestions). When false, network scans capped at 'enum' even if
+   * a target requests 'exploit' intensity.
+   */
+  exploitModuleEnabled: boolean;
+  /**
+   * Claude model used for the deep-reasoning (LARGE) tier. Injected as
+   * ANTHROPIC_LARGE_MODEL when a scan runs. One of MODEL_OPTIONS[].id.
+   */
+  model: string;
 }

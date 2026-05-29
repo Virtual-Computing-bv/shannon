@@ -1,87 +1,68 @@
 import type { Config } from 'tailwindcss';
 
-// Brand tokens lifted from the Nahayat marketing site (src/index.css). Liquid
-// Glass aesthetic: warm onyx background, gold primary, electric violet accent.
-// Dark-first — no light theme.
+// Nahayat "Helder" design system — light, clean, accessible. Ink-navy from the
+// logo (#0B1320) + electric blue accent (#2F6BEF) + cyan support (#0CA5C9).
+// Plus Jakarta Sans for UI, IBM Plex Mono for code/tags. Mirrors ds/tokens.css
+// from the Nahayat design handoff. Light-first — no dark theme.
 export default {
-  darkMode: ['class'],
   content: ['./src/web/**/*.{ts,tsx,html}'],
   theme: {
     extend: {
       colors: {
-        border: 'hsl(var(--border))',
-        input: 'hsl(var(--input))',
-        ring: 'hsl(var(--ring))',
-        background: 'hsl(var(--background))',
-        foreground: 'hsl(var(--foreground))',
-        primary: {
-          DEFAULT: 'hsl(var(--primary))',
-          foreground: 'hsl(var(--primary-foreground))',
+        ink: {
+          900: '#0B1320',
+          800: '#141D2E',
+          700: '#1F2A3D',
+          600: '#36425A',
+          500: '#5A6473',
+          400: '#8A93A3',
+          300: '#A8B0BD',
+          200: '#C9D0DA',
         },
-        secondary: {
-          DEFAULT: 'hsl(var(--secondary))',
-          foreground: 'hsl(var(--secondary-foreground))',
+        blue: {
+          700: '#1E50C4',
+          600: '#2F6BEF',
+          500: '#5689F4',
+          200: '#BFD4FC',
+          100: '#EAF1FE',
+          50: '#F4F8FF',
         },
-        muted: {
-          DEFAULT: 'hsl(var(--muted))',
-          foreground: 'hsl(var(--muted-foreground))',
+        cyan: {
+          600: '#0CA5C9',
+          100: '#E2F6FB',
         },
-        accent: {
-          DEFAULT: 'hsl(var(--accent))',
-          foreground: 'hsl(var(--accent-foreground))',
+        bg: '#FBFCFD',
+        surface: '#FFFFFF',
+        panel: '#F4F6F9',
+        line: {
+          DEFAULT: '#E7EBF1',
+          strong: '#D7DDE6',
         },
-        destructive: {
-          DEFAULT: 'hsl(var(--destructive))',
-          foreground: 'hsl(var(--destructive-foreground))',
-        },
-        card: {
-          DEFAULT: 'hsl(var(--card))',
-          foreground: 'hsl(var(--card-foreground))',
-        },
-        gold: {
-          DEFAULT: 'hsl(36 65% 60%)',
-          light: 'hsl(36 75% 70%)',
-          dark: 'hsl(36 55% 50%)',
-        },
-        violet: {
-          DEFAULT: 'hsl(268 70% 65%)',
-          light: 'hsl(268 75% 75%)',
-          dark: 'hsl(268 65% 55%)',
-        },
-        onyx: {
-          DEFAULT: 'hsl(24 7% 7%)',
-          light: 'hsl(24 7% 11%)',
-        },
-        cream: {
-          DEFAULT: 'hsl(36 25% 94%)',
-          dark: 'hsl(36 20% 86%)',
-        },
+        success: { 600: '#18935F', 100: '#E6F6EF' },
+        warning: { 600: '#C9810C', 100: '#FBF1DE' },
+        danger: { 600: '#D6453A', 100: '#FBEBE9' },
       },
       fontFamily: {
-        display: ['Inter Tight', 'Inter', 'system-ui', 'sans-serif'],
-        body: ['Inter', 'system-ui', 'sans-serif'],
-        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        sans: ['Plus Jakarta Sans', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
+        mono: ['IBM Plex Mono', 'ui-monospace', 'SF Mono', 'Menlo', 'monospace'],
       },
       borderRadius: {
-        lg: '0.875rem',
-        md: '0.625rem',
-        sm: '0.4375rem',
-      },
-      backgroundImage: {
-        'aurora':
-          'radial-gradient(ellipse at top, hsl(268 75% 65% / 0.18), transparent 60%), radial-gradient(ellipse at bottom right, hsl(36 70% 60% / 0.14), transparent 55%)',
-        'gradient-violet':
-          'linear-gradient(135deg, hsl(268 75% 65%) 0%, hsl(280 70% 55%) 100%)',
-        'gradient-gold':
-          'linear-gradient(135deg, hsl(36 80% 70%) 0%, hsl(36 60% 50%) 100%)',
-        'gradient-text':
-          'linear-gradient(135deg, hsl(40 60% 92%) 0%, hsl(36 70% 70%) 50%, hsl(268 70% 75%) 100%)',
+        sm: '8px',
+        md: '12px',
+        lg: '16px',
+        xl: '20px',
+        '2xl': '24px',
+        pill: '100px',
       },
       boxShadow: {
-        soft: '0 4px 24px -8px hsl(0 0% 0% / 0.5)',
-        card: '0 12px 48px -16px hsl(0 0% 0% / 0.6)',
-        glow: '0 0 80px -20px hsl(36 70% 60% / 0.45)',
-        violet: '0 0 80px -20px hsl(268 75% 65% / 0.5)',
+        xs: '0 1px 2px rgba(11,19,32,.05)',
+        sm: '0 1px 2px rgba(11,19,32,.04), 0 4px 12px -6px rgba(11,19,32,.10)',
+        md: '0 1px 2px rgba(11,19,32,.04), 0 8px 24px -12px rgba(11,19,32,.13)',
+        lg: '0 2px 4px rgba(11,19,32,.04), 0 24px 48px -20px rgba(11,19,32,.22)',
+        ring: '0 0 0 3px rgba(47,107,239,.32)',
+      },
+      transitionTimingFunction: {
+        nahayat: 'cubic-bezier(.22,.61,.36,1)',
       },
     },
   },
